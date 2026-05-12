@@ -35,6 +35,23 @@
 
 
 # v3
+# import sys
+# import os
+
+# INTERP = "/home/salesne2/virtualenv/intellect-api.salesnet.ng/3.13/bin/python"
+# if sys.executable != INTERP:
+#     os.execl(INTERP, INTERP, *sys.argv)
+
+# # ASGI → WSGI adapter
+# from a2wsgi import ASGIMiddleware
+
+# from main import app as asgi_app
+
+# # Wrap FastAPI ASGI app in WSGI middleware
+# application = ASGIMiddleware(asgi_app)
+
+
+# 4
 import sys
 import os
 
@@ -42,10 +59,6 @@ INTERP = "/home/salesne2/virtualenv/intellect-api.salesnet.ng/3.13/bin/python"
 if sys.executable != INTERP:
     os.execl(INTERP, INTERP, *sys.argv)
 
-# ASGI → WSGI adapter
-from a2wsgi import ASGIMiddleware
-
-from main import app as asgi_app
-
-# Wrap FastAPI ASGI app in WSGI middleware
-application = ASGIMiddleware(asgi_app)
+# This only works if Passenger is configured for ASGI/generic mode
+# Most shared cPanel hosts do NOT support this
+from main import app as application
