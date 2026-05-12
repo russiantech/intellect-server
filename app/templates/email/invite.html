@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>You're Invited – {{ site_name }}</title>
+  <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    body { margin: 0; padding: 0; background-color: #f6f7fb; font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; }
+    .wrapper { width: 100%; background-color: #f6f7fb; padding: 40px 16px; box-sizing: border-box; }
+    .card { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(88,38,238,.08); }
+    .header { background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 32px 40px; text-align: center; }
+    .logo-text { font-size: 26px; font-weight: 800; color: #7c4dff; letter-spacing: -0.5px; text-decoration: none; }
+    .logo-dot { color: #f38207; border-radius:50% }
+    .header-icon { font-size: 42px; margin-top: 16px; display: block; }
+    .body { padding: 40px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #1a1a2e; }
+    p { margin: 0 0 16px; font-size: 15px; line-height: 1.75; color: #4b5563; }
+    .invite-card { background: linear-gradient(135deg, #faf5ff, #ede9fe); border: 1.5px solid #c4b5fd; border-radius: 14px; padding: 24px; margin: 24px 0; text-align: center; }
+    .invite-from { font-size: 13px; color: #7c4dff; font-weight: 600; margin-bottom: 8px; }
+    .invite-role { display: inline-block; background: #5826ee; color: #fff; padding: 6px 20px; border-radius: 999px; font-size: 14px; font-weight: 700; margin-top: 4px; }
+    .btn { display: inline-block; background: linear-gradient(135deg, #5826ee, #7c4dff); color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 10px; font-weight: 700; font-size: 15px; margin: 8px 0 24px; }
+    .divider { border: none; border-top: 1px solid #f3f4f6; margin: 28px 0; }
+    .notice { background: #f6f7fb; border-radius: 10px; padding: 14px 18px; font-size: 13px; color: #6b7280; line-height: 1.6; }
+    .footer { text-align: center; padding: 24px 40px; font-size: 12px; color: #9ca3af; line-height: 1.7; }
+    .footer a { color: #9ca3af; text-decoration: underline; }
+    @media only screen and (max-width: 600px) {
+      .body { padding: 28px 20px; }
+      .header { padding: 24px; }
+      .footer { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+
+      <!-- Header -->
+      <div class="header">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="vertical-align:middle; padding-right:10px;">
+            <img src="{{ logo_url }}" alt="Intellect Icon/Logo" width="38" height="38"
+                 style="display:block; border:0; border-radius:8px;">
+          </td>
+          <td style="vertical-align:middle;">
+            <span class="logo-text">Intellect<span class="logo-dot">.</span></span>
+          </td>
+        </tr>
+      </table>
+        <span class="header-icon">🎉</span>
+      </div>
+
+      <!-- Body -->
+      <div class="body">
+        <h1>You've been invited!</h1>
+        <p><strong>{{ invited_by }}</strong> has invited you to join <strong>{{ site_name }}</strong>. Here are the details of your invitation:</p>
+
+        <div class="invite-card">
+          <div class="invite-from">Invited by {{ invited_by }}</div>
+          <p style="margin: 8px 0 12px; font-size: 14px; color: #4b5563;">You're being invited to join as a</p>
+          <span class="invite-role">{{ role }}</span>
+        </div>
+
+        <p>Click the button below to accept the invitation and create your account. You'll be up and running in minutes.</p>
+
+        <div style="text-align: center;">
+          <a href="{{ invite_url }}" class="btn">Accept Invitation →</a>
+        </div>
+
+        <hr class="divider">
+
+        <div class="notice">
+          ⏳ This invitation expires in <strong>7 days</strong>.<br>
+          If you weren't expecting this, you can safely ignore this email — no account will be created without your action.
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        © {{ site_name }} · All rights reserved<br>
+        This invitation was sent by {{ invited_by }} via {{ site_name }}.<br>
+        <a href="{{ unsubscribe_url | default('#') }}">Unsubscribe</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

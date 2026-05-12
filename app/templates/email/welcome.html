@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Welcome to {{ site_name }}</title>
+  <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    body { margin: 0; padding: 0; background-color: #f6f7fb; font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; }
+    .wrapper { width: 100%; background-color: #f6f7fb; padding: 40px 16px; box-sizing: border-box; }
+    .card { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(88,38,238,.08); }
+    .header { background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 32px 40px; text-align: center; }
+    .logo-text { font-size: 26px; font-weight: 800; color: #7c4dff; letter-spacing: -0.5px; text-decoration: none; }
+    .logo-dot { color: #f38207; border-radius:50% }
+    .header-tagline { color: rgba(255,255,255,0.75); font-size: 14px; margin-top: 6px; }
+    .body { padding: 40px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #1a1a2e; }
+    p { margin: 0 0 16px; font-size: 15px; line-height: 1.75; color: #4b5563; }
+    .btn { display: inline-block; background: linear-gradient(135deg, #5826ee, #7c4dff); color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 10px; font-weight: 700; font-size: 15px; margin: 8px 0 24px; letter-spacing: 0.2px; }
+    .features { margin: 24px 0; padding: 0; }
+    .feature-row { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px; }
+    .feature-icon { font-size: 22px; flex-shrink: 0; width: 42px; height: 42px; background: #f6f7fb; border-radius: 10px; display: flex; align-items: center; justify-content: center; line-height: 42px; text-align: center; }
+    .feature-text { font-size: 14px; color: #4b5563; line-height: 1.6; padding-top: 10px; }
+    .feature-text strong { color: #1a1a2e; display: block; font-size: 14px; margin-bottom: 2px; }
+    .divider { border: none; border-top: 1px solid #f3f4f6; margin: 28px 0; }
+    .community-box { background: #f6f7fb; border-radius: 12px; padding: 20px; text-align: center; }
+    .community-box p { margin: 0 0 12px; font-size: 14px; }
+    .community-link { display: inline-block; background: #25D366; color: #ffffff !important; text-decoration: none; padding: 10px 24px; border-radius: 8px; font-weight: 600; font-size: 14px; }
+    .footer { text-align: center; padding: 24px 40px; font-size: 12px; color: #9ca3af; line-height: 1.7; }
+    .footer a { color: #9ca3af; text-decoration: underline; }
+    @media only screen and (max-width: 600px) {
+      .body { padding: 28px 20px; }
+      .header { padding: 28px 20px; }
+      .footer { padding: 20px; }
+      .feature-icon { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+
+      <!-- Header -->
+      <div class="header">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="vertical-align:middle; padding-right:10px;">
+            <img src="{{ logo_url }}" alt="Intellect Icon/Logo" width="38" height="38"
+                 style="display:block; border:0; border-radius:8px;">
+          </td>
+          <td style="vertical-align:middle;">
+            <span class="logo-text">Intellect<span class="logo-dot">.</span></span>
+          </td>
+        </tr>
+      </table>
+        <div class="header-tagline">Your Digital Learning Companion</div>
+      </div>
+
+      <!-- Body -->
+      <div class="body">
+        <h1>Welcome aboard, {{ user_name }}! 🎉</h1>
+        <p>Your email has been verified and your account is all set. You're now part of a growing community of learners and creators on <strong>{{ site_name }}</strong>.</p>
+
+        <div style="text-align: center;">
+          <a href="{{ login_url }}" class="btn">Start Learning Now →</a>
+        </div>
+
+        <p style="font-size: 14px; font-weight: 600; color: #1a1a2e; margin-bottom: 12px;">Here's what you can do:</p>
+        <div class="features">
+          <div class="feature-row">
+            <div class="feature-icon">📚</div>
+            <div class="feature-text"><strong>Explore Courses</strong>Enroll in courses across dozens of topics, from tech to creative arts.</div>
+          </div>
+          <div class="feature-row">
+            <div class="feature-icon">🤖</div>
+            <div class="feature-text"><strong>AI Learning Assistant</strong>Get instant answers and explanations as you learn.</div>
+          </div>
+          <div class="feature-row">
+            <div class="feature-icon">🏆</div>
+            <div class="feature-text"><strong>Earn Certificates</strong>Complete courses and earn verified certificates to showcase your skills.</div>
+          </div>
+          <div class="feature-row">
+            <div class="feature-icon">✏️</div>
+            <div class="feature-text"><strong>Create & Sell</strong>Apply to become a creator and share your knowledge with the world.</div>
+          </div>
+        </div>
+
+        {% if whatsapp_link %}
+        <hr class="divider">
+        <div class="community-box">
+          <p>Join our WhatsApp community for tips, peer learning and platform updates:</p>
+          <a href="{{ whatsapp_link }}" class="community-link">👥 Join WhatsApp Community</a>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        © {{ site_name }} · All rights reserved<br>
+        You're receiving this because you verified your account on {{ site_name }}.<br>
+        <a href="{{ unsubscribe_url | default('#') }}">Unsubscribe</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

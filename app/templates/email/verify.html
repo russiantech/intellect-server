@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Verify Your Email – {{ site_name }}</title>
+  <style>
+    /* ── Reset ── */
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    table, td { mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
+    img { -ms-interpolation-mode: bicubic; border: 0; outline: none; text-decoration: none; }
+    /* ── Base ── */
+    body { margin: 0; padding: 0; background-color: #f6f7fb; font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; }
+    .wrapper { width: 100%; background-color: #f6f7fb; padding: 40px 16px; box-sizing: border-box; }
+    /* ── Card ── */
+    .card { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(88,38,238,.08); }
+    /* ── Header bar ── */
+    /* .header { background: linear-gradient(135deg, #5826ee 0%, #7c4dff 100%); padding: 32px 40px; text-align: center; } */
+    .header { background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 32px 40px; text-align: center; }
+    .logo-text { font-size: 26px; font-weight: 800; color: #7c4dff; letter-spacing: -0.5px; text-decoration: none; }
+    .logo-dot { color: #f38207; border-radius:50% }
+    .header-icon { font-size: 42px; margin-top: 16px; display: block; }
+    /* ── Body ── */
+    .body { padding: 40px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #1a1a2e; }
+    p { margin: 0 0 16px; font-size: 15px; line-height: 1.75; color: #4b5563; }
+    /* ── OTP Code block ── */
+    .code-wrapper { text-align: center; margin: 28px 0; }
+    .code-label { font-size: 12px; font-weight: 600; color: #9ca3af; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 12px; }
+    .code-box { display: inline-block; background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 18px 40px; }
+    .code { font-size: 36px; font-weight: 800; letter-spacing: 10px; color: #5826ee; font-family: 'Courier New', Courier, monospace; }
+    .code-expiry { font-size: 13px; color: #9ca3af; margin-top: 10px; }
+    /* ── Divider ── */
+    .divider { border: none; border-top: 1px solid #f3f4f6; margin: 28px 0; }
+    /* ── Notice ── */
+    .notice { background: #faf5ff; border-left: 3px solid #5826ee; border-radius: 0 8px 8px 0; padding: 12px 16px; font-size: 13px; color: #6b7280; line-height: 1.6; }
+    /* ── WhatsApp link ── */
+    .community-link { display: inline-block; margin-top: 4px; color: #5826ee; font-weight: 600; text-decoration: none; }
+    /* ── Footer ── */
+    .footer { text-align: center; padding: 24px 40px; font-size: 12px; color: #9ca3af; line-height: 1.7; }
+    .footer a { color: #9ca3af; text-decoration: underline; }
+    /* ── Responsive ── */
+    @media only screen and (max-width: 600px) {
+      .body { padding: 28px 24px; }
+      .header { padding: 24px; }
+      .code { font-size: 28px; letter-spacing: 6px; }
+      .code-box { padding: 14px 24px; }
+      .footer { padding: 20px 24px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+
+      <!-- Header -->
+      <div class="header">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="vertical-align:middle; padding-right:10px;">
+            <img src="{{ logo_url }}" alt="Intellect Icon/Logo" width="38" height="38"
+                 style="display:block; border:0; border-radius:8px;">
+          </td>
+          <td style="vertical-align:middle;">
+            <span class="logo-text">Intellect<span class="logo-dot">.</span></span>
+          </td>
+        </tr>
+      </table>
+      <!--- <span class="header-icon">✉️</span> -->
+      </div>
+
+      <!-- Body -->
+      <div class="body">
+        <h1>Verify your email address</h1>
+        <p>Hi <strong>{{ user_name }}</strong>, welcome to <strong>{{ site_name }}</strong>! We're thrilled to have you on board.</p>
+        <p>Use the verification code below to confirm your email and activate your account. Enter it on the verification page within the next <strong>10 minutes</strong>.</p>
+
+        <!-- OTP Code -->
+        <div class="code-wrapper">
+          <div class="code-label">Your verification code</div>
+          <div class="code-box">
+            <div class="code">{{ email_code }}</div>
+          </div>
+          <div class="code-expiry">⏱ Expires in 10 minutes</div>
+        </div>
+
+        <hr class="divider">
+
+        <div class="notice">
+          🔒 Never share this code with anyone. {{ site_name }} will never ask for it via call or chat.<br>
+          If you didn't create an account, you can safely ignore this email.
+        </div>
+
+        {% if whatsapp_link %}
+        <p style="margin-top: 20px; font-size: 14px;">
+          Also, join our learner community on WhatsApp for tips, updates and peer support:<br>
+          <a href="{{ whatsapp_link }}" class="community-link">👥 Join the Community →</a>
+        </p>
+        {% endif %}
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        © {{ site_name }} · All rights reserved<br>
+        You're receiving this because you signed up at {{ site_name }}.<br>
+        <a href="{{ unsubscribe_url | default('#') }}">Unsubscribe</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

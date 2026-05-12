@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Course Review Update – {{ site_name }}</title>
+  <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    body { margin: 0; padding: 0; background-color: #f6f7fb; font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; }
+    .wrapper { width: 100%; background-color: #f6f7fb; padding: 40px 16px; box-sizing: border-box; }
+    .card { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(88,38,238,.08); }
+    .header { background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 32px 40px; text-align: center; }
+    .logo-text { font-size: 26px; font-weight: 800; color: #7c4dff; letter-spacing: -0.5px; text-decoration: none; }
+    .logo-dot { color: #f38207; border-radius:50% }
+    .header-icon { font-size: 42px; margin-top: 16px; display: block; }
+    .body { padding: 40px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #1a1a2e; }
+    p { margin: 0 0 16px; font-size: 15px; line-height: 1.75; color: #4b5563; }
+    .status-badge { display: inline-block; background: #fee2e2; color: #991b1b; padding: 6px 18px; border-radius: 999px; font-size: 13px; font-weight: 700; margin-bottom: 20px; }
+    .course-card { background: #f6f7fb; border-radius: 12px; padding: 20px 24px; margin: 20px 0; border-left: 4px solid #f87171; }
+    .course-label { font-size: 11px; font-weight: 600; color: #9ca3af; letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 6px; }
+    .course-title { font-size: 18px; font-weight: 700; color: #1a1a2e; margin: 0; }
+    .feedback-box { background: #fff7f7; border: 1px solid #fecaca; border-left: 4px solid #ef4444; border-radius: 0 10px 10px 0; padding: 16px 20px; margin: 20px 0; }
+    .feedback-label { font-size: 11px; font-weight: 700; color: #ef4444; letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 8px; }
+    .feedback-text { font-size: 14px; color: #4b5563; line-height: 1.7; margin: 0; }
+    .steps { margin: 20px 0; }
+    .step-row { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 14px; font-size: 14px; color: #4b5563; line-height: 1.6; }
+    .step-num { flex-shrink: 0; width: 26px; height: 26px; background: #ede9fe; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; color: #5826ee; line-height: 26px; text-align: center; }
+    .btn { display: inline-block; background: linear-gradient(135deg, #5826ee, #7c4dff); color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 10px; font-weight: 700; font-size: 15px; margin: 8px 0 24px; }
+    .divider { border: none; border-top: 1px solid #f3f4f6; margin: 28px 0; }
+    .footer { text-align: center; padding: 24px 40px; font-size: 12px; color: #9ca3af; line-height: 1.7; }
+    .footer a { color: #9ca3af; text-decoration: underline; }
+    @media only screen and (max-width: 600px) {
+      .body { padding: 28px 20px; }
+      .header { padding: 24px; }
+      .footer { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+
+      <!-- Header -->
+      <div class="header">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="vertical-align:middle; padding-right:10px;">
+            <img src="{{ logo_url }}" alt="Intellect Icon" width="38" height="38"
+                 style="display:block; border:0; border-radius:8px;">
+          </td>
+          <td style="vertical-align:middle;">
+            <span class="logo-text">Intellect<span class="logo-dot">.</span></span>
+          </td>
+        </tr>
+      </table>
+        <span class="header-icon">📋</span>
+      </div>
+
+      <!-- Body -->
+      <div class="body">
+        <span class="status-badge">⚠️ Changes Needed</span>
+        <h1>Course Review Update</h1>
+        <p>Hi <strong>{{ creator_name }}</strong>, thank you for submitting your course. Our review team has looked at it and identified some areas that need attention before it can be published.</p>
+
+        <div class="course-card">
+          <div class="course-label">Submitted Course</div>
+          <div class="course-title">{{ course_title }}</div>
+        </div>
+
+        {% if reason %}
+        <div class="feedback-box">
+          <div class="feedback-label">Reviewer's Feedback</div>
+          <p class="feedback-text">{{ reason }}</p>
+        </div>
+        {% endif %}
+
+        <p>Here's what to do next:</p>
+        <div class="steps">
+          <div class="step-row"><div class="step-num">1</div> Review the feedback carefully and make the necessary changes to your course.</div>
+          <div class="step-row"><div class="step-num">2</div> Update your course content, structure, or materials as indicated.</div>
+          <div class="step-row"><div class="step-num">3</div> Resubmit from your creator dashboard for a new review.</div>
+        </div>
+
+        <div style="text-align: center;">
+          <a href="{{ dashboard_url | default('#') }}" class="btn">Go to Creator Dashboard →</a>
+        </div>
+
+        <hr class="divider">
+
+        <p style="font-size: 13px; color: #9ca3af; margin: 0;">
+          Our team is here to help you succeed. If you need clarification on the feedback, reply to this email and we'll get back to you.
+        </p>
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        © {{ site_name }} · All rights reserved<br>
+        You're receiving this because you submitted a course for review on {{ site_name }}.<br>
+        <a href="{{ unsubscribe_url | default('#') }}">Unsubscribe</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

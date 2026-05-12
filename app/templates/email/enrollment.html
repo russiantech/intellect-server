@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Enrollment Confirmed – {{ site_name }}</title>
+  <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    body { margin: 0; padding: 0; background-color: #f6f7fb; font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; }
+    .wrapper { width: 100%; background-color: #f6f7fb; padding: 40px 16px; box-sizing: border-box; }
+    .card { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(88,38,238,.08); }
+    .header { background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 32px 40px; text-align: center; }
+    .logo-text { font-size: 26px; font-weight: 800; color: #7c4dff; letter-spacing: -0.5px; text-decoration: none; }
+    .logo-dot { color: #f38207; border-radius:50% }
+    .header-icon { font-size: 42px; margin-top: 16px; display: block; }
+    .body { padding: 40px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #1a1a2e; }
+    p { margin: 0 0 16px; font-size: 15px; line-height: 1.75; color: #4b5563; }
+    .course-card { background: #f6f7fb; border-radius: 12px; padding: 20px 24px; margin: 24px 0; border-left: 4px solid #5826ee; }
+    .course-label { font-size: 11px; font-weight: 600; color: #9ca3af; letter-spacing: 1.2px; text-transform: uppercase; margin-bottom: 6px; }
+    .course-title { font-size: 18px; font-weight: 700; color: #1a1a2e; margin: 0; }
+    .btn { display: inline-block; background: linear-gradient(135deg, #5826ee, #7c4dff); color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 10px; font-weight: 700; font-size: 15px; margin: 8px 0 24px; }
+    .checklist { list-style: none; padding: 0; margin: 20px 0; }
+    .checklist li { padding: 8px 0; font-size: 14px; color: #4b5563; border-bottom: 1px solid #f3f4f6; display: flex; align-items: center; gap: 10px; }
+    .checklist li:last-child { border-bottom: none; }
+    .check { color: #5826ee; font-weight: 700; }
+    .divider { border: none; border-top: 1px solid #f3f4f6; margin: 28px 0; }
+    .tip { background: #ede9fe; border-radius: 10px; padding: 14px 18px; font-size: 13px; color: #4b5563; line-height: 1.6; }
+    .footer { text-align: center; padding: 24px 40px; font-size: 12px; color: #9ca3af; line-height: 1.7; }
+    .footer a { color: #9ca3af; text-decoration: underline; }
+    @media only screen and (max-width: 600px) {
+      .body { padding: 28px 20px; }
+      .header { padding: 24px; }
+      .footer { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+
+      <!-- Header -->
+      <div class="header">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="vertical-align:middle; padding-right:10px;">
+            <img src="{{ logo_url }}" alt="Intellect Icon/Logo" width="38" height="38"
+                 style="display:block; border:0; border-radius:8px;">
+          </td>
+          <td style="vertical-align:middle;">
+            <span class="logo-text">Intellect<span class="logo-dot">.</span></span>
+          </td>
+        </tr>
+      </table>
+        <span class="header-icon">🚀</span>
+      </div>
+
+      <!-- Body -->
+      <div class="body">
+        <h1>You're enrolled!</h1>
+        <p>Hi <strong>{{ user_name }}</strong>, congratulations! You've successfully enrolled in:</p>
+
+        <div class="course-card">
+          <div class="course-label">Your Course</div>
+          <div class="course-title">{{ course_title }}</div>
+        </div>
+
+        <p>You can start learning right away. Here's what to expect:</p>
+        <ul class="checklist">
+          <li><span class="check">✦</span> Video lessons, PDFs and interactive content</li>
+          <li><span class="check">✦</span> AI-powered learning assistant in the course player</li>
+          <li><span class="check">✦</span> Progress tracking and assessments</li>
+          <li><span class="check">✦</span> Certificate on completion</li>
+        </ul>
+
+        <div style="text-align: center;">
+          <a href="{{ course_url }}" class="btn">Start Learning Now →</a>
+        </div>
+
+        <hr class="divider">
+
+        <div class="tip">
+          💡 <strong>Pro tip:</strong> Set a consistent study schedule and use the AI assistant whenever you're stuck — it's available 24/7 inside the course player.
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        © {{ site_name }} · All rights reserved<br>
+        You're receiving this because you enrolled in a course on {{ site_name }}.<br>
+        <a href="{{ unsubscribe_url | default('#') }}">Unsubscribe</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

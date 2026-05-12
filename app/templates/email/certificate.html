@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <title>Certificate Earned – {{ site_name }}</title>
+  <style>
+    body, table, td, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
+    body { margin: 0; padding: 0; background-color: #f6f7fb; font-family: 'Segoe UI', Arial, sans-serif; color: #1a1a2e; }
+    .wrapper { width: 100%; background-color: #f6f7fb; padding: 40px 16px; box-sizing: border-box; }
+    .card { max-width: 580px; margin: 0 auto; background: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 4px 24px rgba(88,38,238,.08); }
+    /* Gold gradient header for achievement feel */
+    .header { background: #f6f7fb; border: 2px solid #ede9fe; border-radius: 12px; padding: 32px 40px; text-align: center; }
+    .logo-text { font-size: 26px; font-weight: 800; color: #7c4dff; letter-spacing: -0.5px; text-decoration: none; }
+    .logo-dot { color: #f38207; border-radius:50% }
+    .header-icon { font-size: 52px; margin-top: 16px; display: block; }
+    .body { padding: 40px; }
+    h1 { margin: 0 0 8px; font-size: 22px; font-weight: 700; color: #1a1a2e; }
+    p { margin: 0 0 16px; font-size: 15px; line-height: 1.75; color: #4b5563; }
+    .achievement-box { background: linear-gradient(135deg, #faf5ff, #ede9fe); border: 2px solid #c4b5fd; border-radius: 14px; padding: 28px; text-align: center; margin: 24px 0; }
+    .achievement-label { font-size: 11px; font-weight: 600; color: #7c4dff; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 10px; }
+    .achievement-course { font-size: 20px; font-weight: 800; color: #1a1a2e; margin: 0 0 6px; line-height: 1.3; }
+    .achievement-name { font-size: 14px; color: #6b7280; }
+    .btn { display: inline-block; background: linear-gradient(135deg, #f38207, #f59e0b); color: #ffffff !important; text-decoration: none; padding: 14px 36px; border-radius: 10px; font-weight: 700; font-size: 15px; margin: 8px 0 24px; }
+    .share-section { text-align: center; margin: 24px 0 8px; }
+    .share-label { font-size: 13px; color: #9ca3af; margin-bottom: 14px; }
+    .share-btn { display: inline-block; background: #0a66c2; color: #ffffff !important; text-decoration: none; padding: 10px 22px; border-radius: 8px; font-weight: 600; font-size: 13px; margin: 0 6px; }
+    .divider { border: none; border-top: 1px solid #f3f4f6; margin: 28px 0; }
+    .footer { text-align: center; padding: 24px 40px; font-size: 12px; color: #9ca3af; line-height: 1.7; }
+    .footer a { color: #9ca3af; text-decoration: underline; }
+    @media only screen and (max-width: 600px) {
+      .body { padding: 28px 20px; }
+      .header { padding: 28px 20px; }
+      .footer { padding: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+
+      <!-- Header -->
+      <div class="header">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
+        <tr>
+          <td style="vertical-align:middle; padding-right:10px;">
+            <img src="{{ logo_url }}" alt="Intellect Icon" width="38" height="38"
+                 style="display:block; border:0; border-radius:8px;">
+          </td>
+          <td style="vertical-align:middle;">
+            <span class="logo-text">Intellect<span class="logo-dot">.</span></span>
+          </td>
+        </tr>
+      </table>
+        <span class="header-icon">🏆</span>
+      </div>
+
+      <!-- Body -->
+      <div class="body">
+        <h1>Congratulations, {{ user_name }}!</h1>
+        <p>You've done it! You successfully completed the course and earned a verified certificate from <strong>{{ site_name }}</strong>.</p>
+
+        <div class="achievement-box">
+          <div class="achievement-label">🎓 Certificate of Completion</div>
+          <div class="achievement-course">{{ course_title }}</div>
+          <div class="achievement-name">Awarded to {{ user_name }}</div>
+        </div>
+
+        <p>Your certificate is ready to download. Add it to your LinkedIn profile, CV, portfolio — and share your achievement with the world.</p>
+
+        <div style="text-align: center;">
+          <a href="{{ cert_url }}" class="btn">Download Certificate →</a>
+        </div>
+
+        <hr class="divider">
+
+        <div class="share-section">
+          <div class="share-label">Share your achievement</div>
+          <a href="https://www.linkedin.com/sharing/share-offsite/?url={{ cert_url | urlencode }}" class="share-btn">Share on LinkedIn</a>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="footer">
+        © {{ site_name }} · All rights reserved<br>
+        You earned this certificate by completing a course on {{ site_name }}.<br>
+        <a href="{{ unsubscribe_url | default('#') }}">Unsubscribe</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>
