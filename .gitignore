@@ -107,3 +107,4 @@ alembic/versions/__pycache__/
 # Optional lock files
 # poetry.lock
 # Pipfile.lock
+clean-env.ps1
