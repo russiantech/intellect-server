@@ -158,24 +158,24 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-# ── Global exception handler ─────────────────────────────────────────────────
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    error_id = str(uuid.uuid4())
-    logger.error(
-        f"[{error_id}] Unhandled exception on {request.method} {request.url.path}\n"
-        f"[{error_id}] {type(exc).__name__}: {exc}\n"
-        f"[{error_id}] Traceback:\n{traceback.format_exc()}"
-    )
-    return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={
-            "success": False,
-            "message": "An unexpected error occurred. Please try again or contact support.",
-            "error_id": error_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        },
-    )
+# # ── Global exception handler ─────────────────────────────────────────────────
+# @app.exception_handler(Exception)
+# async def global_exception_handler(request: Request, exc: Exception):
+#     error_id = str(uuid.uuid4())
+#     logger.error(
+#         f"[{error_id}] Unhandled exception on {request.method} {request.url.path}\n"
+#         f"[{error_id}] {type(exc).__name__}: {exc}\n"
+#         f"[{error_id}] Traceback:\n{traceback.format_exc()}"
+#     )
+#     return JSONResponse(
+#         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#         content={
+#             "success": False,
+#             "message": "An unexpected error occurred. Please try again or contact support.",
+#             "error_id": error_id,
+#             "timestamp": datetime.now(timezone.utc).isoformat(),
+#         },
+#     )
 
 
 # ── Routers ──────────────────────────────────────────────────────────────────
