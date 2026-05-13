@@ -32,7 +32,13 @@ class ConfigLoader:
     def _bool(self, v): return str(v).lower() in ("true", "1", "yes")
     def _int(self, v): return int(v)
     def _float(self, v): return float(v)
-    def _list(self, v): return [x.strip() for x in str(v).split(",") if x.strip()] if isinstance(v, str) else v or []
+    # def _list(self, v): return [x.strip() for x in str(v).split(",") if x.strip()] if isinstance(v, str) else v or []
+    def _list(self, v):
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        if isinstance(v, list):
+            return v
+        return []
 
     def load_config(self) -> AppConfig:
         secret = self._get("APP_AUTH_JWT_SECRET_KEY")
@@ -54,7 +60,7 @@ class ConfigLoader:
                 port=self._get("APP_PORT", 8000, self._int),
                 ssl=self._get("APP_SSL", False, self._bool),
                 frontend_url=self._get("APP_FRONTEND_URL", "http://localhost:5173"),
-                allowed_origins=self._get("APP_ALLOWED_ORIGINS", ["http://localhost:5173"], self._list),
+                # allowed_origins=self._get("APP_ALLOWED_ORIGINS", ["http://localhost:5173"], self._list),
                 content_delivery=ContentDeliveryConfig(
                     type=self._get("APP_CONTENT_DELIVERY_TYPE", "filesystem"),
                     filesystem_base_path=self._get("APP_FILESYSTEM_BASE_PATH", "./uploads"),
@@ -85,6 +91,7 @@ class ConfigLoader:
                 refresh_token_expire_minutes=self._get("APP_REFRESH_TOKEN_EXPIRE_MINUTES", 10080, self._int),
                 password_reset_token_expire_minutes=self._get("APP_PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", 15, self._int),
                 email_verification_token_expire_minutes=self._get("APP_EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES", 1440, self._int),
+                cors_allowed_origins=self._get("APP_ALLOWED_ORIGINS", ["http://localhost:5173"], self._list),
             ),
             oauth_config=OAuthConfig(
                 google_client_id=self._get("APP_GOOGLE_CLIENT_ID"),

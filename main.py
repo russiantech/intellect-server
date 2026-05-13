@@ -144,15 +144,37 @@ app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 app.add_middleware(StaticCacheMiddleware)
 
 # ── CORS ─────────────────────────────────────────────────────────────────────
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=(
+#         ["*"] if app_config.general_config.development_mode
+#         else app_config.security_config.cors_allowed_origins
+#     ),
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+# v2
+# ── CORS ─────────────────────────────────────────────────────────────────────
+_cors_origins = app_config.security_config.cors_allowed_origins
+
+if isinstance(_cors_origins, str):
+    _cors_origins = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+elif not isinstance(_cors_origins, list):
+    _cors_origins = ["http://localhost:5173"]
+
+if app_config.general_config.development_mode and not _cors_origins:
+    _cors_origins = ["*"]
+
+logger.info("CORS allowed origins: %s", _cors_origins)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=(
-        ["*"] if app_config.general_config.development_mode
-        else app_config.security_config.cors_allowed_origins
-    ),
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 app.add_middleware(GZipMiddleware, minimum_size=1000)

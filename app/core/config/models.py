@@ -54,7 +54,7 @@ class HostingConfig(BaseModel):
     ssl: bool = False
     port: int = 8000
     use_default_org: bool = True
-    allowed_origins: List[str] = ["http://localhost:5173"]
+    allowed_origins: List[str] = ["http://localhost:5173", "http://localhost:3000"]
     allowed_regexp: str = ""
     self_hosted: bool = True
     frontend_url: str = "http://localhost:5173"
@@ -111,7 +111,9 @@ class SecurityConfig(BaseModel):
     password_reset_token_expire_minutes: int = 15
     email_verification_token_expire_minutes: int = 60 * 24
     bcrypt_rounds: int = 12
-    cors_allowed_origins: List[str] = ["http://localhost:5173"]
+    # cors_allowed_origins: List[str] = ["http://localhost:5173"]
+    cors_allowed_origins: List[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    
 
 
 class OAuthConfig(BaseModel):
@@ -231,3 +233,12 @@ class AppConfig(BaseModel):
     monitoring_config: MonitoringConfig = MonitoringConfig()
     logging_config: LoggingConfig = LoggingConfig()
     background_tasks_config: BackgroundTasksConfig = BackgroundTasksConfig()
+    
+    @computed_field
+    @property
+    def cors_origins(self) -> List[str]:
+        """Unified CORS origins from hosting config."""
+        origins = self.hosting_config.allowed_origins
+        if not origins:
+            return ["http://localhost:5173"]
+        return origins
