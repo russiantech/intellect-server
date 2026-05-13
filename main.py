@@ -1,15 +1,11 @@
-from datetime import datetime, timezone
 import os
 from pathlib import Path
-import uuid
 import logging
-import traceback
 from contextlib import asynccontextmanager
 from logging.handlers import RotatingFileHandler
 
 import uvicorn
-from fastapi import FastAPI, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +18,10 @@ from app.core.exceptions import setup_exception_handlers
 app_config = get_app_config()
 
 LOG_LEVEL = logging.DEBUG if app_config.general_config.development_mode else logging.INFO
-LOG_DIR = os.path.abspath("logs")
+# LOG_DIR = os.path.abspath("logs")
+# Use /tmp on Vercel, local logs/ for development
+LOG_DIR = os.environ.get("LOG_DIR", "/tmp/logs" if os.environ.get("VERCEL") else "logs")
+
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
