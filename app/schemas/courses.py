@@ -347,24 +347,136 @@ class ContentReorderItem(BaseModel):
 
 # ── Learning Path ─────────────────────────────────────────────────────────────
 
+# class PathCreate(BaseModel):
+#     title: str = Field(..., min_length=3, max_length=255)
+#     description: Optional[str] = None
+#     fee: float = 0.0
+#     payment_type: PaymentType = PaymentType.one_time
+#     issues_certificate: bool = True
+#     course_ids: List[int] = []
+#     status: Optional[CourseStatus] = CourseStatus.published
+
+
+# class PathUpdate(BaseModel):
+#     title: Optional[str] = None
+#     description: Optional[str] = None
+#     fee: Optional[float] = None
+#     payment_type: Optional[PaymentType] = None
+#     issues_certificate: Optional[bool] = None
+#     course_ids: Optional[List[int]] = None
+#     status: Optional[CourseStatus] = None
+
+
+# v2
+# ── Learning Path Schemas ────────────────────────────────────────────────────
+
 class PathCreate(BaseModel):
     title: str = Field(..., min_length=3, max_length=255)
-    description: Optional[str] = None
-    fee: float = 0.0
-    payment_type: PaymentType = PaymentType.one_time
-    issues_certificate: bool = True
-    course_ids: List[int] = []
-    status: Optional[CourseStatus] = CourseStatus.published
+    description: Optional[str] = Field(default=None)
+
+    fee: float = Field(default=0.0, ge=0)
+    payment_type: PaymentType = Field(default=PaymentType.one_time)
+
+    course_ids: List[int] = Field(default_factory=list)
+
+    issues_certificate: bool = Field(default=True)
+
+    duration_weeks: Optional[int] = Field(default=None, ge=1)
+
+    instructor_led_fee: float = Field(default=0.0, ge=0)
+
+    subscription_enabled: bool = Field(default=False)
+
+    subscription_interval: Optional[str] = Field(
+        default="monthly",
+        max_length=50,
+    )
+
+    subscription_fee: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+
+    pay_as_you_go_enabled: bool = Field(default=False)
+
+    pay_as_you_go_fee: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+
+    access_period_days: int = Field(
+        default=30,
+        ge=1,
+    )
+
+    what_you_achieve: Optional[str] = Field(default=None)
+
+    status: CourseStatus = Field(
+        default=CourseStatus.published,
+    )
+
+    is_active: bool = Field(default=True)
 
 
 class PathUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    fee: Optional[float] = None
-    payment_type: Optional[PaymentType] = None
-    issues_certificate: Optional[bool] = None
-    course_ids: Optional[List[int]] = None
-    status: Optional[CourseStatus] = None
+    title: Optional[str] = Field(
+        default=None,
+        min_length=3,
+        max_length=255,
+    )
+
+    description: Optional[str] = Field(default=None)
+
+    fee: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+
+    payment_type: Optional[PaymentType] = Field(default=None)
+
+    course_ids: Optional[List[int]] = Field(default=None)
+
+    issues_certificate: Optional[bool] = Field(default=None)
+
+    duration_weeks: Optional[int] = Field(
+        default=None,
+        ge=1,
+    )
+
+    instructor_led_fee: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+
+    subscription_enabled: Optional[bool] = Field(default=None)
+
+    subscription_interval: Optional[str] = Field(
+        default=None,
+        max_length=50,
+    )
+
+    subscription_fee: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+
+    pay_as_you_go_enabled: Optional[bool] = Field(default=None)
+
+    pay_as_you_go_fee: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+
+    access_period_days: Optional[int] = Field(
+        default=None,
+        ge=1,
+    )
+
+    what_you_achieve: Optional[str] = Field(default=None)
+
+    status: Optional[CourseStatus] = Field(default=None)
+
+    is_active: Optional[bool] = Field(default=None)
 
 
 # ── Schedule ──────────────────────────────────────────────────────────────────
