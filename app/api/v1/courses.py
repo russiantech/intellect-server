@@ -542,7 +542,151 @@ def _make_slug(title: str, db: Session, exclude_id: int = None) -> str:
         counter += 1
 
 
-def _course_dict(course: Course, user: Optional[User] = None) -> dict:
+# def _course_dict(course: Course, user: Optional[User] = None) -> dict:
+#     enrollment = None
+#     if user:
+#         enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
+
+#     avg_rating = None
+#     if course.feedbacks:
+#         avg_rating = round(
+#             sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
+#         )
+
+#     return {
+#         "id": course.id,
+#         "title": course.title,
+#         "slug": course.slug,
+#         "description": course.description,
+#         "short_description": course.short_description,
+#         "thumbnail":     _absolute_url(course.thumbnail,     "courses/thumbnails"),
+#         "preview_video": _absolute_url(course.preview_video, "courses/previews"),
+#         "fee": course.fee,
+#         "payment_type": course.payment_type,
+#         "subscription_interval": course.subscription_interval,
+#         "subscription_installments": course.subscription_installments,
+#         "lang": course.lang,
+#         "duration_weeks": course.duration_weeks,
+#         "level": course.level,
+#         "status": course.status,
+#         "views": course.views,
+#         "featured": course.featured,
+#         "requirements": course.requirements,
+#         "what_you_learn": course.what_you_learn,
+#         "creator_pct":  course.creator_pct,
+#         "platform_pct": course.platform_pct,
+#         "creator_id": course.creator_id,
+#         "throttle_enabled": course.throttle_enabled,
+#         "weekly_topic_limit": course.weekly_topic_limit,
+#         "monthly_topic_limit": course.monthly_topic_limit,
+#         "creator": _mini_user(course.creator) if course.creator else None,
+#         "categories": [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
+#         "tags": [{"id": t.id, "name": t.name} for t in course.tags],
+#         "lessons_count": len(course.lessons),
+#         "topics_count": sum(len(l.topics) for l in course.lessons),
+#         "enrolled_count": len(course.enrollments),
+#         "avg_rating": avg_rating,
+#         "is_enrolled": enrollment is not None,
+#         "progress_pct": enrollment.progress_pct if enrollment else 0.0,
+#         "created_at": course.created_at,
+#         "approved_at": course.approved_at,
+#         "rejection_reason": course.rejection_reason,
+#     }
+
+
+def _mini_user(user: User) -> dict:
+    return {
+        "id": user.id, "name": user.name, "username": user.username,
+        "image": _absolute_url(user.image, "avatars"),
+        "title": user.title,
+    }
+
+# +++++++++++++++++++
+# courses.py — _course_dict and _build_payment_types
+#
+# PATCH — drop these two functions in to replace the existing _course_dict.
+# The rest of the file is unchanged.
+#
+# What changed and why
+# ─────────────────────────────────────────────────────────────────────────
+# 1. available_payment_types is now built and returned.
+#    The frontend's derivePaymentOptions() always prefers this array; without
+#    it the fallback had to guess fees from the single `fee` field, which is
+#    0 for subscription/PAYG courses that store the real fee in a separate
+#    column (subscription_fee / pay_as_you_go_fee).
+#
+# 2. subscription_fee, pay_as_you_go_fee, access_period_days,
+#    instructor_led_fee are all returned as top-level fields so the frontend
+#    can also read them directly when building its own UI (price blocks,
+#    "includes" list, billing descriptions, etc.).
+#
+# 3. _build_payment_types is a pure helper that reads exactly the columns
+#    each payment model actually uses — no cross-type fee leakage.
+# ─────────────────────────────────────────────────────────────────────────
+
+from typing import Optional
+# (existing imports already present in the file — shown here for context only)
+
+
+def _build_payment_types(course) -> list:
+    """
+    Build the available_payment_types list consumed by the frontend
+    PaymentTypeSelector.  Each entry's `fee` is the actual charge amount
+    for that billing model, not the generic `course.fee` column.
+    """
+    pt = course.payment_type or "one_time"
+
+    if pt == "free":
+        return [{"payment_type": "free", "fee": 0, "label": "Free"}]
+
+    if pt == "one_time":
+        return [{
+            "payment_type": "one_time",
+            "fee":           float(course.fee or 0),
+            "label":         "One-time",
+        }]
+
+    if pt == "subscription":
+        # Use subscription_fee when set; fall back to fee
+        sub_fee  = float(
+            getattr(course, "subscription_fee", None)
+            or course.fee
+            or 0
+        )
+        interval = (course.subscription_interval or "monthly").lower()
+        label    = interval.capitalize() + "ly"   # "monthly" → "Monthly" → "Monthlyly"
+        # Better: map known intervals
+        label_map = {
+            "weekly": "Weekly", "monthly": "Monthly",
+            "quarterly": "Quarterly", "yearly": "Yearly",
+        }
+        label = label_map.get(interval, label)
+        return [{
+            "payment_type":          "subscription",
+            "fee":                   sub_fee,
+            "subscription_interval": interval,
+            "label":                 label,
+        }]
+
+    if pt == "pay_as_you_go":
+        payg_fee   = float(
+            getattr(course, "pay_as_you_go_fee", None)
+            or course.fee
+            or 0
+        )
+        access_days = int(getattr(course, "access_period_days", None) or 30)
+        return [{
+            "payment_type":       "pay_as_you_go",
+            "fee":                payg_fee,
+            "access_period_days": access_days,
+            "label":              "Pay-as-you-go",
+        }]
+
+    # Unknown type — return as-is
+    return [{"payment_type": pt, "fee": float(course.fee or 0), "label": pt}]
+
+
+def _course_dict(course, user: Optional = None) -> dict:
     enrollment = None
     if user:
         enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
@@ -554,53 +698,63 @@ def _course_dict(course: Course, user: Optional[User] = None) -> dict:
         )
 
     return {
-        "id": course.id,
-        "title": course.title,
-        "slug": course.slug,
-        "description": course.description,
-        "short_description": course.short_description,
-        "thumbnail":     _absolute_url(course.thumbnail,     "courses/thumbnails"),
-        "preview_video": _absolute_url(course.preview_video, "courses/previews"),
-        "fee": course.fee,
-        "payment_type": course.payment_type,
-        "subscription_interval": course.subscription_interval,
+        "id":                        course.id,
+        "title":                     course.title,
+        "slug":                      course.slug,
+        "description":               course.description,
+        "short_description":         course.short_description,
+        "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
+        "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
+
+        # ── Payment fields ────────────────────────────────────────────────────
+        # fee          = the generic / base price column (used for one_time)
+        # subscription_fee   = per-period fee for subscription billing
+        # pay_as_you_go_fee  = per-window fee for PAYG billing
+        # instructor_led_fee = optional uplift when student opts into live sessions
+        # access_period_days = number of days unlocked by one PAYG payment
+        #
+        # available_payment_types is pre-built so the frontend pill-switcher
+        # can render correctly without extra API calls.
+        "fee":                       float(course.fee or 0),
+        "payment_type":              course.payment_type,
+        "subscription_interval":     course.subscription_interval,
+        "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
+        "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
+        "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
+        "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
+        "available_payment_types":   _build_payment_types(course),
+        # ─────────────────────────────────────────────────────────────────────
+
         "subscription_installments": course.subscription_installments,
-        "lang": course.lang,
-        "duration_weeks": course.duration_weeks,
-        "level": course.level,
-        "status": course.status,
-        "views": course.views,
-        "featured": course.featured,
-        "requirements": course.requirements,
-        "what_you_learn": course.what_you_learn,
-        "creator_pct":  course.creator_pct,
-        "platform_pct": course.platform_pct,
-        "creator_id": course.creator_id,
-        "throttle_enabled": course.throttle_enabled,
-        "weekly_topic_limit": course.weekly_topic_limit,
-        "monthly_topic_limit": course.monthly_topic_limit,
-        "creator": _mini_user(course.creator) if course.creator else None,
-        "categories": [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
-        "tags": [{"id": t.id, "name": t.name} for t in course.tags],
-        "lessons_count": len(course.lessons),
-        "topics_count": sum(len(l.topics) for l in course.lessons),
-        "enrolled_count": len(course.enrollments),
-        "avg_rating": avg_rating,
-        "is_enrolled": enrollment is not None,
-        "progress_pct": enrollment.progress_pct if enrollment else 0.0,
-        "created_at": course.created_at,
-        "approved_at": course.approved_at,
-        "rejection_reason": course.rejection_reason,
+        "lang":                      course.lang,
+        "duration_weeks":            course.duration_weeks,
+        "level":                     course.level,
+        "status":                    course.status,
+        "views":                     course.views,
+        "featured":                  course.featured,
+        "requirements":              course.requirements,
+        "what_you_learn":            course.what_you_learn,
+        "creator_pct":               course.creator_pct,
+        "platform_pct":              course.platform_pct,
+        "creator_id":                course.creator_id,
+        "throttle_enabled":          course.throttle_enabled,
+        "weekly_topic_limit":        course.weekly_topic_limit,
+        "monthly_topic_limit":       course.monthly_topic_limit,
+        "creator":                   _mini_user(course.creator) if course.creator else None,
+        "categories":                [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
+        "tags":                      [{"id": t.id, "name": t.name} for t in course.tags],
+        "lessons_count":             len(course.lessons),
+        "topics_count":              sum(len(l.topics) for l in course.lessons),
+        "enrolled_count":            len(course.enrollments),
+        "avg_rating":                avg_rating,
+        "is_enrolled":               enrollment is not None,
+        "progress_pct":              enrollment.progress_pct if enrollment else 0.0,
+        "created_at":                course.created_at,
+        "approved_at":               course.approved_at,
+        "rejection_reason":          course.rejection_reason,
     }
 
-
-def _mini_user(user: User) -> dict:
-    return {
-        "id": user.id, "name": user.name, "username": user.username,
-        "image": _absolute_url(user.image, "avatars"),
-        "title": user.title,
-    }
-
+# +++++++++++++++++++
 
 # ─────────────────────────────────────────────
 #  Secure content serving
@@ -688,43 +842,6 @@ async def serve_content(
 # ─────────────────────────────────────────────
 #  Existing topic-content endpoint — now returns token URLs
 # ─────────────────────────────────────────────
-
-# @router.get("/{course_id}/topics/{topic_id}/content")
-# async def get_topic_content(
-#     course_id: int, topic_id: int,
-#     user: User = Depends(get_current_user),
-#     db: Session = Depends(get_db),
-# ):
-#     topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
-#     if not topic:
-#         raise HTTPException(status_code=404, detail="Topic not found")
-
-#     if not topic.is_free_preview:
-#         enrolled = db.query(Enrollment).filter(
-#             Enrollment.user_id == user.id,
-#             Enrollment.course_id == course_id,
-#         ).first()
-#         if not enrolled and not user.is_admin():
-#             raise HTTPException(status_code=403, detail="Enrollment required")
-
-#     return {
-#         "id": topic.id, "title": topic.title, "description": topic.description,
-#         "contents": [
-#             {
-#                 "id": c.id,
-#                 "title": c.title,
-#                 "content_type": c.content_type,
-#                 # Return signed token URL — never the real file path or URL
-#                 "url": _make_content_token_url(c, user.id),
-#                 # For text content, body is returned inline (no file download needed)
-#                 "body": c.body if c.content_type == CT.text else None,
-#                 "duration_seconds": c.duration_seconds,
-#                 "order_index": c.order_index,
-#             }
-#             for c in sorted(topic.contents, key=lambda x: x.order_index)
-#         ],
-#     }
-
 
 # v2 - allows anonymous users for previews:
 # In courses.py — replace BOTH get_topic_content definitions with this ONE:

@@ -1,17 +1,22 @@
 # v2
+from datetime import datetime, timedelta, timezone
 import os
 import uuid
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, or_, text
 
 from app.db.database import get_db
 from app.models import User, Role
 from app.schemas import UserUpdateRequest, AdminUpdateUser
 from app.api.deps.auth import get_current_user, require_admin
 from app.core.config import get_app_config
+from app.api.v1.courses import _absolute_url
+from app.models.courses import Course, Topic
+from app.models.payments import Enrollment, EnrollmentStatus, PathEnrollment, Payment, PaymentStatus
+from app.models.quizzes import AttendanceRecord
 
 router = APIRouter(prefix="/users", tags=["Users"])
 logger = logging.getLogger(__name__)
@@ -319,3 +324,283 @@ async def remove_role(user_id: int, role_name: str, db: Session = Depends(get_db
     
     data = {"message": f"Role '{role_name}' removed", "roles": [r.name for r in user.roles]}
     return data
+
+
+# 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN USER ENROLLMENT TRACKING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@router.get("/{user_id}/enrollments", dependencies=[Depends(require_admin)])
+async def get_user_enrollments(
+    user_id: int,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin view: Get all course enrollments for a specific user.
+    Includes progress, payment status, and enrollment history.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    enrollments = db.query(Enrollment).filter(
+        Enrollment.user_id == user_id,
+    ).options(
+        joinedload(Enrollment.course).joinedload(Course.creator),
+        joinedload(Enrollment.course).joinedload(Course.categories),
+    ).order_by(Enrollment.created_at.desc()).all()
+
+    # Get payment status for each enrollment
+    result = []
+    for e in enrollments:
+        payment = db.query(Payment).filter(
+            Payment.user_id == user_id,
+            Payment.course_id == e.course_id,
+            Payment.tx_status == PaymentStatus.successful,
+        ).order_by(Payment.created_at.desc()).first()
+
+        result.append({
+            "id": e.id,
+            "course": {
+                "id": e.course.id,
+                "title": e.course.title,
+                "slug": e.course.slug,
+                "thumbnail": _absolute_url(e.course.thumbnail, "courses/thumbnails"),
+                "level": e.course.level,
+                "fee": e.course.fee,
+                "creator_name": e.course.creator.name if e.course.creator else None,
+                "categories": [c.title for c in e.course.categories],
+            } if e.course else None,
+            "status": e.status.value if hasattr(e.status, 'value') else str(e.status),
+            "progress_pct": e.progress_pct,
+            "completed_topics": e.completed_topics,
+            "admin_assigned": getattr(e, "admin_assigned", False),
+            "created_at": e.created_at,
+            "completed_at": e.completed_at,
+            "deenrolled_at": getattr(e, "deenrolled_at", None),
+            "deenrollment_reason": getattr(e, "deenrollment_reason", None),
+            "payment": {
+                "amount": float(payment.amount) if payment else None,
+                "status": payment.tx_status.value if payment and hasattr(payment.tx_status, 'value') else None,
+                "paid_at": payment.created_at if payment else None,
+                "payment_method": getattr(payment, "payment_method", None),
+            },
+            "throttle_stats": {
+                "topics_this_week": getattr(e, "topics_accessed_this_week", 0),
+                "topics_this_month": getattr(e, "topics_accessed_this_month", 0),
+                "weekly_limit": e.course.weekly_topic_limit if e.course else None,
+                "monthly_limit": e.course.monthly_topic_limit if e.course else None,
+            } if e.course and getattr(e.course, "throttle_enabled", False) else None,
+        })
+
+    total = len(result)
+    start = (page - 1) * per_page
+    end = start + per_page
+
+    return {
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "username": user.username,
+            "image": _avatar_url(user.image),
+        },
+        "items": result[start:end],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+    }
+
+
+@router.get("/{user_id}/path-enrollments", dependencies=[Depends(require_admin)])
+async def get_user_path_enrollments(
+    user_id: int,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin view: Get all learning path enrollments for a specific user.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    enrollments = db.query(PathEnrollment).filter(
+        PathEnrollment.user_id == user_id,
+    ).options(
+        joinedload(PathEnrollment.path),
+    ).order_by(PathEnrollment.created_at.desc()).all()
+
+    result = []
+    for pe in enrollments:
+        # Count completed courses in this path
+        path_course_ids = [c.id for c in pe.path.courses] if pe.path and pe.path.courses else []
+        completed_courses = db.query(Enrollment).filter(
+            Enrollment.user_id == user_id,
+            Enrollment.course_id.in_(path_course_ids),
+            Enrollment.status == EnrollmentStatus.completed,
+        ).count() if path_course_ids else 0
+
+        result.append({
+            "id": pe.id,
+            "path": {
+                "id": pe.path.id,
+                "title": pe.path.title,
+                "slug": pe.path.slug,
+                "thumbnail": pe.path.thumbnail,
+                "courses_count": len(pe.path.courses) if pe.path.courses else 0,
+                "fee": pe.path.fee,
+            } if pe.path else None,
+            "status": pe.status.value if hasattr(pe.status, 'value') else str(pe.status),
+            "progress_pct": pe.progress_pct,
+            "completed_courses": completed_courses,
+            "total_courses": len(path_course_ids),
+            "created_at": pe.created_at,
+            "completed_at": pe.completed_at,
+        })
+
+    total = len(result)
+    start = (page - 1) * per_page
+    end = start + per_page
+
+    return {
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "username": user.username,
+            "image": _avatar_url(user.image),
+        },
+        "items": result[start:end],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+    }
+
+
+@router.get("/{user_id}/activity", dependencies=[Depends(require_admin)])
+async def get_user_learning_activity(
+    user_id: int,
+    period_days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin view: Comprehensive learning activity report for a user.
+    Includes topic progress, assessment submissions, attendance, and engagement metrics.
+    """
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    now = datetime.now(timezone.utc)
+    period_start = now - timedelta(days=period_days)
+
+    # Recent topic completions
+    recent_completions = db.execute(
+        text("""
+            SELECT t.title, t.course_id, c.title as course_title, utp.completed_at
+            FROM user_topic_progress utp
+            JOIN topics t ON utp.topic_id = t.id
+            JOIN courses c ON t.course_id = c.id
+            WHERE utp.user_id = :uid AND utp.completed = true AND utp.completed_at >= :start
+            ORDER BY utp.completed_at DESC
+            LIMIT 20
+        """),
+        {"uid": user_id, "start": period_start},
+    ).fetchall()
+
+    # Assessment submissions
+    from app.models import LessonAssessmentSubmission
+    assessments = db.query(LessonAssessmentSubmission).filter(
+        LessonAssessmentSubmission.user_id == user_id,
+        LessonAssessmentSubmission.created_at >= period_start,
+    ).order_by(LessonAssessmentSubmission.created_at.desc()).limit(20).all()
+
+    # Attendance records
+    attendance = db.query(AttendanceRecord).filter(
+        AttendanceRecord.user_id == user_id,
+        AttendanceRecord.created_at >= period_start,
+    ).order_by(AttendanceRecord.created_at.desc()).limit(20).all()
+
+    # Enrollment history
+    enrollment_history = db.query(Enrollment).filter(
+        Enrollment.user_id == user_id,
+    ).order_by(Enrollment.created_at.desc()).all()
+
+    # Calculate engagement score (topics accessed / total topics available)
+    total_topics_available = db.query(func.count(Topic.id)).join(Course).join(Enrollment).filter(
+        Enrollment.user_id == user_id,
+        Enrollment.is_active == True,
+    ).scalar() or 0
+
+    total_topics_completed = db.execute(
+        text("SELECT COUNT(*) FROM user_topic_progress WHERE user_id = :uid AND completed = true"),
+        {"uid": user_id},
+    ).scalar() or 0
+
+    engagement_score = round((total_topics_completed / total_topics_available * 100), 1) if total_topics_available > 0 else 0.0
+
+    return {
+        "user": {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "username": user.username,
+            "image": _avatar_url(user.image),
+        },
+        "period_days": period_days,
+        "summary": {
+            "total_enrollments": len(enrollment_history),
+            "active_enrollments": sum(1 for e in enrollment_history if e.is_active),
+            "completed_enrollments": sum(1 for e in enrollment_history if getattr(e.status, 'value', str(e.status)) == 'completed'),
+            "total_topics_completed": total_topics_completed,
+            "engagement_score": engagement_score,
+        },
+        "recent_topic_completions": [
+            {
+                "topic_title": r.title,
+                "course_title": r.course_title,
+                "completed_at": r.completed_at,
+            }
+            for r in recent_completions
+        ],
+        "recent_assessments": [
+            {
+                "id": a.id,
+                "assessment_id": a.assessment_id,
+                "score": a.score,
+                "percentage": a.percentage,
+                "passed": a.passed,
+                "attempt_number": a.attempt_number,
+                "submitted_at": a.submitted_at,
+            }
+            for a in assessments
+        ],
+        "recent_attendance": [
+            {
+                "schedule_id": att.schedule_id,
+                "present": att.status,
+                "marked_at": att.created_at,
+            }
+            for att in attendance
+        ],
+        "enrollment_timeline": [
+            {
+                "course_id": e.course_id,
+                "course_title": e.course.title if e.course else None,
+                "status": e.status.value if hasattr(e.status, 'value') else str(e.status),
+                "enrolled_at": e.created_at,
+                "completed_at": e.completed_at,
+                "progress_pct": e.progress_pct,
+            }
+            for e in enrollment_history[:50]
+        ],
+    }
+

@@ -89,6 +89,7 @@ class PathEnrollment(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(SAEnum(EnrollmentStatus), default=EnrollmentStatus.active)
     progress_pct: Mapped[float] = mapped_column(Float, default=0.0)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # user: Mapped["User"] = relationship("User", back_populates="path")
     path: Mapped["LearningPath"] = relationship("LearningPath", back_populates="path_enrollments")
     course_enrollments: Mapped[List["Enrollment"]] = relationship("Enrollment", back_populates="path_enrollment")
 

@@ -33,7 +33,8 @@ from app.core.config import get_app_config
 from app.api.v1.auth import router as auth_router
 from app.api.v1.users import router as users_router
 from app.api.v1.courses import router as courses_router
-from app.api.v1.enrollments import router as enrollments_router, path_router
+from app.api.v1.enrollments import router as enrollments_router
+from app.api.v1.paths import router as  path_router
 from app.api.v1.quizzes import router as quiz_router
 from app.api.v1.lesson_assessments import router as lesson_assessments_router
 # from app.api.v1.assessments import router as assessments_router

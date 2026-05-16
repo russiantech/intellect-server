@@ -4,9 +4,9 @@ Includes content throttle enforcement for subscription/pay-as-you-go courses.
 """
 import logging
 import uuid as _uuid
-from typing import Optional, List
+from typing import Optional
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, text
 
@@ -17,14 +17,16 @@ from app.models import (
 )
 from app.models.payments import PaymentStatus, EnrollmentStatus
 from app.enums import CourseStatus, CertStatus
-from app.schemas import EnrollRequest, ProgressUpdate, PathCreate, PathUpdate, SuccessResponse
-from app.api.deps.auth import get_current_user, get_current_verified_user, require_admin, optional_user
+from app.schemas import EnrollRequest, ProgressUpdate
+from app.api.deps.auth import get_current_user, get_current_verified_user, require_admin
 from app.services.email_service import send_enrollment_confirmation
 from app.core.config import get_app_config
-from app import db
+from app.api.v1.courses import _absolute_url
+from app.api.v1.users import _avatar_url
+from app.schemas.common import SuccessResponse
+from app.schemas.enrollments import DeenrollRequest
 
 router = APIRouter(prefix="/enrollments", tags=["Enrollments & Progress"])
-path_router = APIRouter(prefix="/paths", tags=["Learning Paths"])
 logger = logging.getLogger(__name__)
 
 
@@ -384,383 +386,446 @@ async def my_certificates(
     ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# LEARNING PATHS — LIST (with slug-based lookup support)
-# ═══════════════════════════════════════════════════════════════════════════════
 
-def _serialize_course_minimal(c: Course) -> dict:
-    """Minimal course serialization for path listings."""
-    return {
-        "id": c.id,
-        "title": c.title,
-        "slug": c.slug,
-        "thumbnail": c.thumbnail,
-        "level": c.level,
-        "fee": c.fee,
-        "payment_type": c.payment_type,
-        "lessons_count": len(c.lessons) if c.lessons else 0,
-        "topics_count": db.query(Topic).filter(Topic.course_id == c.id).count() if hasattr(c, 'id') else 0,
-        "duration_weeks": c.duration_weeks,
-        "status": c.status,
-    }
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # ADMIN ENROLLMENT MANAGEMENT — Course & Path
+# # ═══════════════════════════════════════════════════════════════════════════════
 
+# @router.get("/courses", dependencies=[Depends(require_admin)])
+# async def list_course_enrollments(
+#     course_id: Optional[int] = None,
+#     user_id: Optional[int] = None,
+#     status: Optional[str] = None,
+#     page: int = Query(1, ge=1),
+#     per_page: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     List all course enrollments with filtering.
+#     Returns enrollment details including student info, progress, and payment status.
+#     """
+#     q = db.query(Enrollment).options(
+#         joinedload(Enrollment.user),
+#         joinedload(Enrollment.course).joinedload(Course.creator),
+#     )
 
-def _calculate_path_duration(path: LearningPath, db: Session) -> int:
-    """Calculate path duration: use path.duration_weeks if set, otherwise sum course durations."""
-    if path.duration_weeks and path.duration_weeks > 0:
-        return path.duration_weeks
+#     if course_id:
+#         q = q.filter(Enrollment.course_id == course_id)
+#     if user_id:
+#         q = q.filter(Enrollment.user_id == user_id)
+#     if status:
+#         q = q.filter(Enrollment.status == status)
 
-    total = 0
-    for course in path.courses:
-        if course.duration_weeks:
-            total += course.duration_weeks
-    return total
+#     total = q.count()
+#     enrollments = q.order_by(Enrollment.created_at.desc())\
+#         .offset((page - 1) * per_page)\
+#         .limit(per_page)\
+#         .all()
 
-
-def _calculate_path_stats(path: LearningPath, db: Session) -> dict:
-    """Calculate aggregated stats for a learning path."""
-    total_lessons = 0
-    total_topics = 0
-    total_duration = 0
-
-    for course in path.courses:
-        total_lessons += len(course.lessons) if course.lessons else 0
-        total_topics += db.query(func.count(Topic.id)).filter(Topic.course_id == course.id).scalar() or 0
-        total_duration += course.duration_weeks or 0
-
-    return {
-        "lessons_count": total_lessons,
-        "topics_count": total_topics,
-        "duration_weeks": path.duration_weeks or total_duration,
-    }
-
-
-@path_router.get("/")
-async def list_paths(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(20, ge=1, le=100),
-    search: Optional[str] = None,
-    db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(optional_user),
-):
-    q = db.query(LearningPath).filter(
-        LearningPath.status == CourseStatus.published, LearningPath.is_active == True,
-    )
-    if search:
-        q = q.filter(LearningPath.title.ilike(f"%{search}%"))
-
-    total = q.with_entities(func.count(LearningPath.id)).scalar()
-    paths = q.order_by(LearningPath.created_at.desc())             .offset((page - 1) * per_page)             .limit(per_page)             .all()
-
-    enrolled_ids = set()
-    if current_user:
-        pes = db.query(PathEnrollment.path_id).filter(
-            PathEnrollment.user_id == current_user.id,
-        ).all()
-        enrolled_ids = {pe.path_id for pe in pes}
-
-    return {
-        "items": [
-            {
-                "id": p.id,
-                "title": p.title,
-                "slug": p.slug,
-                "description": p.description,
-                "thumbnail": p.thumbnail,
-                "fee": p.fee,
-                "payment_type": p.payment_type,
-                "courses_count": len(p.courses),
-                "course_ids": [c.id for c in p.courses],
-                "duration_weeks": _calculate_path_duration(p, db),
-                "issues_certificate": p.issues_certificate,
-                "is_enrolled": p.id in enrolled_ids,
-                "available_payment_types": _derive_payment_types(p),
-                "instructor_led_fee": getattr(p, 'instructor_led_fee', None),
-            }
-            for p in paths
-        ],
-        "total": total, "page": page, "per_page": per_page,
-        "pages": (total + per_page - 1) // per_page,
-    }
+#     return {
+#         "items": [
+#             {
+#                 "id": e.id,
+#                 "user": {
+#                     "id": e.user.id,
+#                     "name": e.user.name,
+#                     "email": e.user.email,
+#                     "username": e.user.username,
+#                     "image": _avatar_url(e.user.image),
+#                 } if e.user else None,
+#                 "course": {
+#                     "id": e.course.id,
+#                     "title": e.course.title,
+#                     "slug": e.course.slug,
+#                     "thumbnail": _absolute_url(e.course.thumbnail, "courses/thumbnails"),
+#                     "creator_name": e.course.creator.name if e.course.creator else None,
+#                 } if e.course else None,
+#                 "status": e.status.value if hasattr(e.status, 'value') else str(e.status),
+#                 "progress_pct": e.progress_pct,
+#                 "completed_topics": e.completed_topics,
+#                 "admin_assigned": getattr(e, "admin_assigned", False),
+#                 "created_at": e.created_at,
+#                 "completed_at": e.completed_at,
+#                 "topics_accessed_this_week": getattr(e, "topics_accessed_this_week", 0),
+#                 "topics_accessed_this_month": getattr(e, "topics_accessed_this_month", 0),
+#             }
+#             for e in enrollments
+#         ],
+#         "total": total,
+#         "page": page,
+#         "per_page": per_page,
+#         "pages": (total + per_page - 1) // per_page,
+#     }
 
 
-def _derive_payment_types(path: LearningPath) -> List[dict]:
-    """Derive available payment types for a path, matching course behavior."""
-    types = []
+# @router.get("/paths", dependencies=[Depends(require_admin)])
+# async def list_path_enrollments(
+#     path_id: Optional[int] = None,
+#     user_id: Optional[int] = None,
+#     page: int = Query(1, ge=1),
+#     per_page: int = Query(20, ge=1, le=100),
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     List all learning path enrollments with filtering.
+#     """
+#     q = db.query(PathEnrollment).options(
+#         joinedload(PathEnrollment.user),
+#         joinedload(PathEnrollment.path),
+#     )
 
-    if not path.fee or path.fee == 0:
-        types.append({"payment_type": "free", "fee": 0})
-        return types
+#     if path_id:
+#         q = q.filter(PathEnrollment.path_id == path_id)
+#     if user_id:
+#         q = q.filter(PathEnrollment.user_id == user_id)
 
-    # Always offer one-time
-    types.append({"payment_type": "one_time", "fee": path.fee})
+#     total = q.count()
+#     enrollments = q.order_by(PathEnrollment.created_at.desc())\
+#         .offset((page - 1) * per_page)\
+#         .limit(per_page)\
+#         .all()
 
-    # Subscription if configured
-    if getattr(path, 'subscription_enabled', False):
-        interval = getattr(path, 'subscription_interval', 'monthly')
-        types.append({
-            "payment_type": "subscription",
-            "fee": getattr(path, 'subscription_fee', path.fee * 0.9),
-            "subscription_interval": interval,
-        })
-
-    # Pay-as-you-go if configured
-    if getattr(path, 'pay_as_you_go_enabled', False):
-        types.append({
-            "payment_type": "pay_as_you_go",
-            "fee": getattr(path, 'pay_as_you_go_fee', path.fee),
-            "access_period_days": getattr(path, 'access_period_days', 30),
-        })
-
-    return types if types else [{"payment_type": "one_time", "fee": path.fee}]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# LEARNING PATHS — DETAIL (slug-based)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-@path_router.get("/by-slug/{slug}")
-async def get_path_by_slug(
-    slug: str,
-    db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(optional_user),
-):
-    """Get path details by slug — primary public endpoint."""
-    path = db.query(LearningPath).options(
-        joinedload(LearningPath.courses).joinedload(Course.lessons),
-    ).filter(
-        LearningPath.slug == slug,
-        LearningPath.is_active == True,
-    ).first()
-
-    if not path:
-        raise HTTPException(status_code=404, detail="Learning path not found")
-
-    is_enrolled = False
-    progress_pct = 0
-
-    if current_user:
-        pe = db.query(PathEnrollment).filter(
-            PathEnrollment.user_id == current_user.id,
-            PathEnrollment.path_id == path.id,
-        ).first()
-        is_enrolled = pe is not None
-        if pe:
-            progress_pct = pe.progress_pct or 0
-
-    stats = _calculate_path_stats(path, db)
-
-    return {
-        "id": path.id,
-        "title": path.title,
-        "slug": path.slug,
-        "description": path.description,
-        "thumbnail": path.thumbnail,
-        "fee": path.fee,
-        "payment_type": path.payment_type,
-        "status": path.status,
-        "issues_certificate": path.issues_certificate,
-        "is_enrolled": is_enrolled,
-        "progress_pct": progress_pct,
-        "duration_weeks": stats["duration_weeks"],
-        "courses_count": len(path.courses),
-        "lessons_count": stats["lessons_count"],
-        "topics_count": stats["topics_count"],
-        "available_payment_types": _derive_payment_types(path),
-        "instructor_led_fee": getattr(path, 'instructor_led_fee', 0),
-        "what_you_achieve": getattr(path, 'what_you_achieve', None),
-        "creator": {
-            "id": path.created_by_id,
-            "name": path.creator.name if hasattr(path, 'creator') and path.creator else None,
-            "image": path.creator.image if hasattr(path, 'creator') and path.creator else None,
-        } if hasattr(path, 'creator') else None,
-        "courses": [
-            {
-                "id": c.id,
-                "title": c.title,
-                "slug": c.slug,
-                "thumbnail": c.thumbnail,
-                "level": c.level,
-                "fee": c.fee,
-                "payment_type": c.payment_type,
-                "lessons_count": len(c.lessons) if c.lessons else 0,
-                "topics_count": db.query(func.count(Topic.id)).filter(Topic.course_id == c.id).scalar() or 0,
-                "duration_weeks": c.duration_weeks,
-                "status": c.status,
-                "is_enrolled": db.query(Enrollment).filter(
-                    Enrollment.user_id == current_user.id if current_user else None,
-                    Enrollment.course_id == c.id,
-                ).first() is not None if current_user else False,
-            }
-            for c in path.courses
-        ],
-    }
+#     return {
+#         "items": [
+#             {
+#                 "id": pe.id,
+#                 "user": {
+#                     "id": pe.user.id,
+#                     "name": pe.user.name,
+#                     "email": pe.user.email,
+#                     "username": pe.user.username,
+#                     "image": _avatar_url(pe.user.image),
+#                 } if pe.user else None,
+#                 "path": {
+#                     "id": pe.path.id,
+#                     "title": pe.path.title,
+#                     "slug": pe.path.slug,
+#                     "thumbnail": pe.path.thumbnail,
+#                     "courses_count": len(pe.path.courses) if pe.path.courses else 0,
+#                 } if pe.path else None,
+#                 "status": pe.status.value if hasattr(pe.status, 'value') else str(pe.status),
+#                 "progress_pct": pe.progress_pct,
+#                 "created_at": pe.created_at,
+#                 "completed_at": pe.completed_at,
+#             }
+#             for pe in enrollments
+#         ],
+#         "total": total,
+#         "page": page,
+#         "per_page": per_page,
+#         "pages": (total + per_page - 1) // per_page,
+#     }
 
 
-# Keep ID-based endpoint for backward compatibility / admin
-@path_router.get("/{path_id}")
-async def get_path(
-    path_id: int,
-    db: Session = Depends(get_db),
-    current_user: Optional[User] = Depends(optional_user),
-):
-    """Get path by ID — primarily for admin/internal use."""
-    path = db.query(LearningPath).options(
-        joinedload(LearningPath.courses),
-    ).filter(LearningPath.id == path_id).first()
+# @router.post("/courses/{enrollment_id}/deenroll", dependencies=[Depends(require_admin)])
+# async def deenroll_from_course(
+#     enrollment_id: int,
+#     payload: DeenrollRequest,
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Admin de-enroll a student from a course.
+#     Also removes associated payments (refund logic handled separately).
+#     """
+#     enrollment = db.query(Enrollment).filter(Enrollment.id == enrollment_id).first()
+#     if not enrollment:
+#         raise HTTPException(status_code=404, detail="Enrollment not found")
 
-    if not path:
-        raise HTTPException(status_code=404, detail="Learning path not found")
+#     course = enrollment.course
+#     user = enrollment.user
 
-    is_enrolled = False
-    if current_user:
-        pe = db.query(PathEnrollment).filter(
-            PathEnrollment.user_id == current_user.id, PathEnrollment.path_id == path_id,
-        ).first()
-        is_enrolled = pe is not None
+#     # Soft delete — mark as inactive rather than hard delete for audit trail
+#     enrollment.is_active = False
+#     enrollment.status = EnrollmentStatus.suspended
+#     enrollment.deenrolled_at = datetime.now(timezone.utc)
+#     enrollment.deenrollment_reason = payload.reason
+#     enrollment.deenrolled_by_id = payload.user_id  # Admin user ID from token
 
-    stats = _calculate_path_stats(path, db)
+#     db.commit()
 
-    return {
-        "id": path.id,
-        "title": path.title,
-        "slug": path.slug,
-        "description": path.description,
-        "thumbnail": path.thumbnail,
-        "fee": path.fee,
-        "payment_type": path.payment_type,
-        "status": path.status,
-        "issues_certificate": path.issues_certificate,
-        "is_enrolled": is_enrolled,
-        "duration_weeks": stats["duration_weeks"],
-        "courses_count": len(path.courses),
-        "lessons_count": stats["lessons_count"],
-        "topics_count": stats["topics_count"],
-        "available_payment_types": _derive_payment_types(path),
-        "instructor_led_fee": getattr(path, 'instructor_led_fee', 0),
-        "courses": [
-            {
-                "id": c.id,
-                "title": c.title,
-                "slug": c.slug,
-                "thumbnail": c.thumbnail,
-                "level": c.level,
-                "fee": c.fee,
-                "lessons_count": len(c.lessons) if c.lessons else 0,
-                "topics_count": db.query(func.count(Topic.id)).filter(Topic.course_id == c.id).scalar() or 0,
-                "duration_weeks": c.duration_weeks,
-            }
-            for c in path.courses
-        ],
-    }
+#     logger.info(
+#         "Admin de-enrolled user %s from course %s. Reason: %s",
+#         user.id if user else "unknown",
+#         course.id if course else "unknown",
+#         payload.reason,
+#     )
+
+#     return SuccessResponse(
+#         message=f"User de-enrolled from '{course.title if course else 'course'}' successfully"
+#     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# LEARNING PATHS — ADMIN CRUD
-# ═══════════════════════════════════════════════════════════════════════════════
+# @router.post("/paths/{path_enrollment_id}/deenroll", dependencies=[Depends(require_admin)])
+# async def deenroll_from_path(
+#     path_enrollment_id: int,
+#     payload: DeenrollRequest,
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Admin de-enroll a student from a learning path.
+#     Also de-enrolls from all associated courses in the path.
+#     """
+#     path_enrollment = db.query(PathEnrollment).filter(PathEnrollment.id == path_enrollment_id).first()
+#     if not path_enrollment:
+#         raise HTTPException(status_code=404, detail="Path enrollment not found")
 
-@path_router.post("/", dependencies=[Depends(require_admin)], status_code=201)
-async def create_path(
-    payload: PathCreate,
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
-):
-    from slugify import slugify as _slugify
+#     path = path_enrollment.path
+#     user = path_enrollment.user
 
-    path = LearningPath(
-        title=payload.title,
-        description=payload.description,
-        fee=payload.fee,
-        payment_type=payload.payment_type,
-        slug=_slugify(payload.title),
-        created_by_id=admin.id,
-        issues_certificate=payload.issues_certificate,
-        duration_weeks=payload.duration_weeks,
-        instructor_led_fee=payload.instructor_led_fee,
-        subscription_enabled=payload.subscription_enabled,
-        subscription_interval=payload.subscription_interval,
-        subscription_fee=payload.subscription_fee,
-        pay_as_you_go_enabled=payload.pay_as_you_go_enabled,
-        pay_as_you_go_fee=payload.pay_as_you_go_fee,
-        access_period_days=payload.access_period_days,
-        what_you_achieve=payload.what_you_achieve,
-    )
+#     # De-enroll from all courses in the path
+#     if path and path.courses:
+#         for course in path.courses:
+#             course_enrollment = db.query(Enrollment).filter(
+#                 Enrollment.user_id == user.id,
+#                 Enrollment.course_id == course.id,
+#                 Enrollment.path_enrollment_id == path_enrollment.id,
+#             ).first()
+#             if course_enrollment:
+#                 course_enrollment.is_active = False
+#                 course_enrollment.status = EnrollmentStatus.suspended
 
-    if payload.course_ids:
-        path.courses = db.query(Course).filter(Course.id.in_(payload.course_ids)).all()
+#     # Soft delete path enrollment
+#     path_enrollment.is_active = False
+#     path_enrollment.status = EnrollmentStatus.suspended
+#     path_enrollment.deenrolled_at = datetime.now(timezone.utc)
+#     path_enrollment.deenrollment_reason = payload.reason
 
-    db.add(path)
-    db.commit()
-    db.refresh(path)
+#     db.commit()
 
-    return {
-        "id": path.id,
-        "title": path.title,
-        "slug": path.slug,
-        "courses_count": len(path.courses),
-    }
+#     return SuccessResponse(
+#         message=f"User de-enrolled from path '{path.title if path else 'path'}' and all associated courses"
+#     )
 
 
-@path_router.put("/{path_id}", dependencies=[Depends(require_admin)])
-async def update_path(
-    path_id: int,
-    payload: PathUpdate,
-    db: Session = Depends(get_db),
-):
-    path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
-    if not path:
-        raise HTTPException(status_code=404, detail="Path not found")
+# @router.get("/analytics/courses/{course_id}", dependencies=[Depends(require_admin)])
+# async def get_course_enrollment_analytics(
+#     course_id: int,
+#     period_days: int = Query(30, ge=1, le=365),
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Comprehensive analytics for a specific course:
+#     - Enrollment trends over time
+#     - Completion rates
+#     - Student engagement (topics accessed)
+#     - Revenue from enrollments
+#     - Demographics (if available)
+#     """
+#     course = db.query(Course).filter(Course.id == course_id).first()
+#     if not course:
+#         raise HTTPException(status_code=404, detail="Course not found")
 
-    # Update scalar fields
-    update_data = payload.model_dump(exclude_none=True, exclude={"course_ids"})
-    for k, v in update_data.items():
-        setattr(path, k, v)
+#     now = datetime.now(timezone.utc)
+#     period_start = now - timedelta(days=period_days)
 
-    # Update courses if provided
-    if payload.course_ids is not None:
-        path.courses = db.query(Course).filter(Course.id.in_(payload.course_ids)).all()
+#     # Total enrollments
+#     total_enrollments = db.query(Enrollment).filter(Enrollment.course_id == course_id).count()
+#     active_enrollments = db.query(Enrollment).filter(
+#         Enrollment.course_id == course_id,
+#         Enrollment.is_active == True,
+#     ).count()
+#     completed_enrollments = db.query(Enrollment).filter(
+#         Enrollment.course_id == course_id,
+#         Enrollment.status == EnrollmentStatus.completed,
+#     ).count()
 
-    db.commit()
-    db.refresh(path)
+#     # New enrollments in period
+#     new_enrollments = db.query(Enrollment).filter(
+#         Enrollment.course_id == course_id,
+#         Enrollment.created_at >= period_start,
+#     ).count()
 
-    return {
-        "id": path.id,
-        "title": path.title,
-        "slug": path.slug,
-        "courses_count": len(path.courses),
-        "course_ids": [c.id for c in path.courses],
-    }
+#     # Average progress
+#     avg_progress = db.query(func.avg(Enrollment.progress_pct)).filter(
+#         Enrollment.course_id == course_id,
+#         Enrollment.is_active == True,
+#     ).scalar() or 0.0
+
+#     # Revenue from this course
+#     course_revenue = db.query(func.sum(Payment.amount)).filter(
+#         Payment.course_id == course_id,
+#         Payment.tx_status == PaymentStatus.successful,
+#         Payment.created_at >= period_start,
+#     ).scalar() or 0.0
+
+#     # Daily enrollment trend
+#     daily_trend = []
+#     for i in range(period_days - 1, -1, -1):
+#         day = now - timedelta(days=i)
+#         day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+#         day_end = day_start + timedelta(days=1)
+#         count = db.query(Enrollment).filter(
+#             Enrollment.course_id == course_id,
+#             Enrollment.created_at >= day_start,
+#             Enrollment.created_at < day_end,
+#         ).count()
+#         daily_trend.append({
+#             "date": day.strftime("%Y-%m-%d"),
+#             "enrollments": count,
+#         })
+
+#     # Top students by progress
+#     top_students = db.query(Enrollment).filter(
+#         Enrollment.course_id == course_id,
+#         Enrollment.is_active == True,
+#     ).order_by(Enrollment.progress_pct.desc()).limit(10).all()
+
+#     return {
+#         "course_id": course_id,
+#         "course_title": course.title,
+#         "period_days": period_days,
+#         "summary": {
+#             "total_enrollments": total_enrollments,
+#             "active_enrollments": active_enrollments,
+#             "completed_enrollments": completed_enrollments,
+#             "completion_rate": round((completed_enrollments / total_enrollments * 100), 1) if total_enrollments > 0 else 0.0,
+#             "new_enrollments_in_period": new_enrollments,
+#             "average_progress_pct": round(float(avg_progress), 1),
+#             "revenue_in_period": float(course_revenue),
+#         },
+#         "daily_enrollment_trend": daily_trend,
+#         "top_performers": [
+#             {
+#                 "user_id": e.user_id,
+#                 "name": e.user.name if e.user else None,
+#                 "progress_pct": e.progress_pct,
+#                 "completed_topics": e.completed_topics,
+#             }
+#             for e in top_students
+#         ],
+#     }
 
 
-@path_router.post("/{path_id}/courses/{course_id}", dependencies=[Depends(require_admin)])
-async def add_course_to_path(path_id: int, course_id: int, db: Session = Depends(get_db)):
-    path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
-    course = db.query(Course).filter(Course.id == course_id).first()
-    if not path or not course:
-        raise HTTPException(status_code=404, detail="Path or course not found")
-    if course not in path.courses:
-        path.courses.append(course)
-        db.commit()
-    return SuccessResponse(message="Course added to path")
+# @router.get("/analytics/paths/{path_id}", dependencies=[Depends(require_admin)])
+# async def get_path_enrollment_analytics(
+#     path_id: int,
+#     period_days: int = Query(30, ge=1, le=365),
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Comprehensive analytics for a specific learning path.
+#     """
+#     path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
+#     if not path:
+#         raise HTTPException(status_code=404, detail="Learning path not found")
+
+#     now = datetime.now(timezone.utc)
+#     period_start = now - timedelta(days=period_days)
+
+#     total_enrollments = db.query(PathEnrollment).filter(PathEnrollment.path_id == path_id).count()
+#     active_enrollments = db.query(PathEnrollment).filter(
+#         PathEnrollment.path_id == path_id,
+#         PathEnrollment.is_active == True,
+#     ).count()
+#     completed = db.query(PathEnrollment).filter(
+#         PathEnrollment.path_id == path_id,
+#         PathEnrollment.status == EnrollmentStatus.completed,
+#     ).count()
+
+#     new_in_period = db.query(PathEnrollment).filter(
+#         PathEnrollment.path_id == path_id,
+#         PathEnrollment.created_at >= period_start,
+#     ).count()
+
+#     avg_progress = db.query(func.avg(PathEnrollment.progress_pct)).filter(
+#         PathEnrollment.path_id == path_id,
+#         PathEnrollment.is_active == True,
+#     ).scalar() or 0.0
+
+#     daily_trend = []
+#     for i in range(period_days - 1, -1, -1):
+#         day = now - timedelta(days=i)
+#         day_start = day.replace(hour=0, minute=0, second=0, microsecond=0)
+#         day_end = day_start + timedelta(days=1)
+#         count = db.query(PathEnrollment).filter(
+#             PathEnrollment.path_id == path_id,
+#             PathEnrollment.created_at >= day_start,
+#             PathEnrollment.created_at < day_end,
+#         ).count()
+#         daily_trend.append({"date": day.strftime("%Y-%m-%d"), "enrollments": count})
+
+#     return {
+#         "path_id": path_id,
+#         "path_title": path.title,
+#         "period_days": period_days,
+#         "summary": {
+#             "total_enrollments": total_enrollments,
+#             "active_enrollments": active_enrollments,
+#             "completed_enrollments": completed,
+#             "completion_rate": round((completed / total_enrollments * 100), 1) if total_enrollments > 0 else 0.0,
+#             "new_enrollments_in_period": new_in_period,
+#             "average_progress_pct": round(float(avg_progress), 1),
+#         },
+#         "daily_enrollment_trend": daily_trend,
+#     }
 
 
-@path_router.delete("/{path_id}/courses/{course_id}", dependencies=[Depends(require_admin)])
-async def remove_course_from_path(path_id: int, course_id: int, db: Session = Depends(get_db)):
-    path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
-    if not path:
-        raise HTTPException(status_code=404, detail="Path not found")
-    path.courses = [c for c in path.courses if c.id != course_id]
-    db.commit()
-    return SuccessResponse(message="Course removed from path")
+# @router.get("/analytics/global", dependencies=[Depends(require_admin)])
+# async def get_global_enrollment_analytics(
+#     period_days: int = Query(30, ge=1, le=365),
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Global enrollment analytics across all courses and paths.
+#     """
+#     now = datetime.now(timezone.utc)
+#     period_start = now - timedelta(days=period_days)
 
+#     # Course enrollments
+#     total_course_enrollments = db.query(Enrollment).count()
+#     active_course_enrollments = db.query(Enrollment).filter(Enrollment.is_active == True).count()
+#     new_course_enrollments = db.query(Enrollment).filter(Enrollment.created_at >= period_start).count()
 
-@path_router.delete("/{path_id}", dependencies=[Depends(require_admin)])
-async def delete_path(path_id: int, db: Session = Depends(get_db)):
-    path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
-    if not path:
-        raise HTTPException(status_code=404, detail="Path not found")
-    path.is_deleted = True
-    path.is_active = False
-    db.commit()
-    return SuccessResponse(message="Path deleted")
+#     # Path enrollments
+#     total_path_enrollments = db.query(PathEnrollment).count()
+#     active_path_enrollments = db.query(PathEnrollment).filter(PathEnrollment.is_active == True).count()
+#     new_path_enrollments = db.query(PathEnrollment).filter(PathEnrollment.created_at >= period_start).count()
 
+#     # Revenue
+#     total_revenue = db.query(func.sum(Payment.amount)).filter(
+#         Payment.tx_status == PaymentStatus.successful,
+#         Payment.created_at >= period_start,
+#     ).scalar() or 0.0
+
+#     # Top courses by enrollment
+#     top_courses = db.query(
+#         Course.id, Course.title, func.count(Enrollment.id).label("enrollment_count")
+#     ).join(Enrollment, Enrollment.course_id == Course.id)\
+#         .filter(Enrollment.created_at >= period_start)\
+#         .group_by(Course.id, Course.title)\
+#         .order_by(func.count(Enrollment.id).desc())\
+#         .limit(10)\
+#         .all()
+
+#     # Top paths by enrollment
+#     top_paths = db.query(
+#         LearningPath.id, LearningPath.title, func.count(PathEnrollment.id).label("enrollment_count")
+#     ).join(PathEnrollment, PathEnrollment.path_id == LearningPath.id)\
+#         .filter(PathEnrollment.created_at >= period_start)\
+#         .group_by(LearningPath.id, LearningPath.title)\
+#         .order_by(func.count(PathEnrollment.id).desc())\
+#         .limit(10)\
+#         .all()
+
+#     return {
+#         "period_days": period_days,
+#         "courses": {
+#             "total_enrollments": total_course_enrollments,
+#             "active_enrollments": active_course_enrollments,
+#             "new_in_period": new_course_enrollments,
+#         },
+#         "paths": {
+#             "total_enrollments": total_path_enrollments,
+#             "active_enrollments": active_path_enrollments,
+#             "new_in_period": new_path_enrollments,
+#         },
+#         "revenue_in_period": float(total_revenue),
+#         "top_courses": [
+#             {"id": c.id, "title": c.title, "enrollments": c.enrollment_count}
+#             for c in top_courses
+#         ],
+#         "top_paths": [
+#             {"id": p.id, "title": p.title, "enrollments": p.enrollment_count}
+#             for p in top_paths
+#         ],
+#     }
