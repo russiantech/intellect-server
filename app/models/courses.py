@@ -46,7 +46,7 @@ from app.enums import (
     SubscriptionInterval, CertStatus,
 )
 from app.models.association_tables import (
-    course_tag_assoc, course_category_assoc,
+    course_tag_assoc, path_category_assoc, course_category_assoc,
     path_course_assoc, user_topic_progress,
 )
 from app.db.database import Base
@@ -67,6 +67,7 @@ class Category(Base, TimestampMixin):
     image:       Mapped[Optional[str]] = mapped_column(String(500))
     icon:        Mapped[Optional[str]] = mapped_column(String(100))
     slug:        Mapped[Optional[str]] = mapped_column(String(150), unique=True)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     courses: Mapped[List["Course"]] = relationship(
         "Course", secondary=course_category_assoc, back_populates="categories",
@@ -135,6 +136,24 @@ class Course(Base, TimestampMixin):
     subscription_interval:    Mapped[Optional[str]] = mapped_column(SAEnum(SubscriptionInterval), nullable=True)
     subscription_installments: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # 
+        # ── Multi-model pricing (fee-based; no single payment_type lock-in) ──────
+    # Each model is enabled when its fee > 0.
+    # subscription_enabled / pay_as_you_go_enabled / installment_enabled are
+    # soft flags kept for UI state; the backend _build_payment_types() ignores
+    # them and uses fee > 0 as the canonical gate.
+ 
+    subscription_fee:      Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    subscription_enabled:  Mapped[bool]            = mapped_column(Boolean, default=False)
+ 
+    pay_as_you_go_fee:     Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pay_as_you_go_enabled: Mapped[bool]            = mapped_column(Boolean, default=False)
+ 
+    # Installment / payment-plan support
+    installment_enabled:   Mapped[bool]            = mapped_column(Boolean, default=False)
+    installment_count:     Mapped[Optional[int]]   = mapped_column(Integer, nullable=True)   # total instalments
+    installment_fee:       Mapped[Optional[float]] = mapped_column(Float, nullable=True)     # per-instalment fee
+    
     # ── Instructor-led mode ───────────────────────────────────────────────────
     # When > 0 the CourseDetail page shows a toggle that students can opt into.
     # If toggled, this fee is added on top of the base fee at payment time.
@@ -197,7 +216,17 @@ class Course(Base, TimestampMixin):
     feedbacks:      Mapped[List["Feedback"]]        = relationship("Feedback",      back_populates="course")
     payments:       Mapped[List["Payment"]]         = relationship("Payment",       back_populates="course")
     certificates:   Mapped[List["Certificate"]]     = relationship("Certificate",   back_populates="course")
-    tutor_assignments: Mapped[List["TutorAssignment"]] = relationship("TutorAssignment", back_populates="course")
+    tutor_assignments: Mapped[List["TutorAssignment"]] = relationship(
+        "TutorAssignment",
+        foreign_keys="TutorAssignment.course_id",
+        back_populates="course"
+        )
+    
+    # instructor_assignments: Mapped[List["InstructorAssignment"]] = relationship(
+    #     "InstructorAssignment",
+    #     foreign_keys="InstructorAssignment.course_id",
+    #     back_populates="course",
+    # )
     schedules:      Mapped[List["Schedule"]]        = relationship(
         "Schedule", back_populates="course", cascade="all, delete-orphan",
     )
@@ -325,56 +354,6 @@ class TopicContent(Base, TimestampMixin):
 #  LEARNING PATH
 # ─────────────────────────────────────────────
 
-# class LearningPath(Base, TimestampMixin):
-#     """
-#     An ordered collection of courses sold as a bundle.
-
-#     Instructor-led and pay-as-you-go semantics mirror the Course model:
-#     instructor_led_fee  — extra fee when student opts into instructor-led mode
-#     access_period_days  — days of access per pay-as-you-go payment on this path
-#     """
-#     __tablename__ = "learning_paths"
-
-#     id:          Mapped[int]           = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     title:       Mapped[str]           = mapped_column(String(255), unique=True, nullable=False)
-#     description: Mapped[Optional[str]] = mapped_column(Text)
-#     thumbnail:   Mapped[Optional[str]] = mapped_column(String(500))
-#     slug:        Mapped[Optional[str]] = mapped_column(String(300), unique=True)
-
-#     # ── Pricing ───────────────────────────────────────────────────────────────
-#     fee:          Mapped[float] = mapped_column(Float, default=0.0)
-#     payment_type: Mapped[str]   = mapped_column(SAEnum(PaymentType), default=PaymentType.one_time)
-
-#     # ── Instructor-led / pay-as-you-go (same semantics as Course) ────────────
-#     instructor_led_fee: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-#     access_period_days: Mapped[int]   = mapped_column(Integer, default=30, nullable=False)
-    
-#     # ── Status / soft-delete ─────────────────────────────────────────────────
-#     status:     Mapped[str]  = mapped_column(SAEnum(CourseStatus), default=CourseStatus.published)
-#     is_active:  Mapped[bool] = mapped_column(Boolean, default=True)   # routers filter on this
-#     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)  # routers set this on delete
-
-#     # ── Certificate on path completion ───────────────────────────────────────
-#     issues_certificate: Mapped[bool] = mapped_column(Boolean, default=True)
-
-#     # ── Owner ────────────────────────────────────────────────────────────────
-#     created_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-
-#     # ── Relationships ─────────────────────────────────────────────────────────
-#     courses: Mapped[List["Course"]] = relationship(
-#         "Course", secondary=path_course_assoc, back_populates="learning_paths",
-#     )
-#     path_enrollments: Mapped[List["PathEnrollment"]] = relationship(
-#         "PathEnrollment", back_populates="path",
-#     )
-#     subscription_plans: Mapped[List["SubscriptionPlan"]] = relationship(
-#         "SubscriptionPlan", foreign_keys=[SubscriptionPlan.path_id],
-#     )
-
-# ─────────────────────────────────────────────
-#  LEARNING PATH
-# ─────────────────────────────────────────────
-
 class LearningPath(Base, TimestampMixin):
     """
     An ordered collection of courses sold as a bundle.
@@ -496,7 +475,16 @@ class LearningPath(Base, TimestampMixin):
         "SubscriptionPlan",
         foreign_keys=[SubscriptionPlan.path_id],
     )
-
+    #
+    categories: Mapped[List["Category"]] = relationship(
+        "Category", secondary=path_category_assoc,
+    )
+ 
+    tutor_assignments: Mapped[List["TutorAssignment"]] = relationship(
+        "TutorAssignment",
+        foreign_keys="TutorAssignment.path_id",
+        back_populates="path",
+    )
 
 # ─────────────────────────────────────────────
 #  CERTIFICATE

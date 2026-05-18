@@ -30,6 +30,12 @@ class CourseStatus(str, enum.Enum):
     unpublished = "unpublished"
     rejected    = "rejected"
 
+class TutorAssignmentStatus(str, enum.Enum):
+    pending  = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    revoked  = "revoked"
+    inactive = "inactive"
 
 class CourseLevel(str, enum.Enum):
     novice        = "novice"

@@ -1,4 +1,4 @@
-from typing import Literal, Optional, List
+from typing import Dict, Literal, Optional, List
 from pydantic import BaseModel, Field, computed_field
 
 
@@ -120,14 +120,47 @@ class OAuthConfig(BaseModel):
     google_client_id: Optional[str] = None
     google_client_secret: Optional[str] = None
     google_redirect_uri: Optional[str] = None
+
     facebook_client_id: Optional[str] = None
     facebook_client_secret: Optional[str] = None
     facebook_redirect_uri: Optional[str] = None
+
     twitter_client_id: Optional[str] = None
     twitter_client_secret: Optional[str] = None
     twitter_redirect_uri: Optional[str] = None
 
+    # --- NEW ---
+    github_client_id: Optional[str] = None
+    github_client_secret: Optional[str] = None
+    github_redirect_uri: Optional[str] = None
 
+    linkedin_client_id: Optional[str] = None
+    linkedin_client_secret: Optional[str] = None
+    linkedin_redirect_uri: Optional[str] = None
+
+
+# class OAuthProviderConfig(BaseModel):
+#     """Runtime provider bundle (secrets + hardcoded URLs)."""
+#     client_id: str
+#     client_secret: str
+#     authorize_url: str
+#     token_url: str
+#     userinfo_url: str
+#     scopes: List[str] = Field(default_factory=list)
+#     emails_url: Optional[str] = None   # GitHub only
+
+
+class OAuthProviderConfig(BaseModel):
+    """Runtime provider bundle (secrets + hardcoded URLs + optional redirect override)."""
+    client_id: str
+    client_secret: str
+    authorize_url: str
+    token_url: str
+    userinfo_url: str
+    scopes: List[str] = Field(default_factory=list)
+    emails_url: Optional[str] = None
+    redirect_uri: Optional[str] = None   # ← NEW: per-provider override from env
+    
 class ChromaDBConfig(BaseModel):
     is_separate_database_enabled: bool = False
     db_host: Optional[str] = None
@@ -227,6 +260,7 @@ class AppConfig(BaseModel):
     redis_config: RedisConfig = RedisConfig()
     security_config: SecurityConfig
     oauth_config: OAuthConfig = OAuthConfig()
+    oauth_provider_config: Dict[str, OAuthProviderConfig] = Field(default_factory=dict)
     ai_config: AIConfig = AIConfig()
     mail_config: MailConfig = MailConfig()
     payments_config: PaymentsConfig = PaymentsConfig()
@@ -242,3 +276,7 @@ class AppConfig(BaseModel):
         if not origins:
             return ["http://localhost:5173"]
         return origins
+    
+    # class Config:
+    #     env_prefix = "INTELLECT_"
+    #     env_file = ".env"

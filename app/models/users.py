@@ -72,6 +72,9 @@ class User(Base, TimestampMixin):
     ip: Mapped[Optional[str]] = mapped_column(String(50))
 
     # ── Relationships ──────────────────────────────────────────────────────────
+    oauth_accounts = relationship("OAuthAccount", 
+        back_populates="user", cascade="all, delete-orphan")
+    
     roles: Mapped[List["Role"]] = relationship(
         "Role", secondary=user_role_assoc, back_populates="users"
     )
@@ -138,6 +141,24 @@ class EmailToken(Base):
     used: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Boolean
+from sqlalchemy.orm import relationship
+from datetime import datetime, timezone
+
+class OAuthAccount(Base):
+    __tablename__ = "oauth_accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(50), nullable=False)          # google, github, facebook, linkedin
+    provider_account_id = Column(String(255), nullable=False, index=True)
+    access_token = Column(Text, nullable=True)
+    refresh_token = Column(Text, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    user = relationship("User", back_populates="oauth_accounts")
 
 
 # ─── FEEDBACK ─────────────────────────────────────

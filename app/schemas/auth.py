@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -17,11 +18,22 @@ class SignupRequest(BaseModel):
         return v.lower()
 
 
+# class SigninRequest(BaseModel):
+#     email: EmailStr
+#     password: str
+#     remember_me: bool = False
+# v2
 class SigninRequest(BaseModel):
-    email: EmailStr
-    password: str
-    remember_me: bool = False
+    identifier: str = Field(..., min_length=1, description="Email, username or phone number")
+    password: str = Field(..., min_length=1)
+    remember_me: bool = Field(default=False)
 
+class OAuthAccountOut(BaseModel):
+    provider: str
+    created_at: Optional[datetime] = Field(default=None)
+
+    class Config:
+        from_attributes = True
 
 class TokenResponse(BaseModel):
     access_token: str

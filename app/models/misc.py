@@ -5,12 +5,11 @@ from datetime import datetime
 from typing import Optional, List
 from sqlalchemy import (
     Integer, String, Text, Boolean, Float, DateTime,
-    ForeignKey, JSON, UniqueConstraint, Table, Column
+    ForeignKey, JSON, UniqueConstraint
 )
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
 from sqlalchemy import Enum as SAEnum
-import enum
 
 from app.db.database import Base
 from app.models.base import TimestampMixin
@@ -21,195 +20,171 @@ from app.models.users import User
 from app.enums import (
     NotificationType, BroadcastType,
     TeamRequestStatus, PartnershipStatus,
+    TutorAssignmentStatus,
 )
 
-# ─── ENUMS ────────────────────────────────────────
+# ─── v2 - TUTOR ASSIGNMENTS ──────────────────────────────────────────────────────
 
-# class AssessmentType(str, enum.Enum):
-#     classwork = "classwork"
-#     homework = "homework"
-#     exam = "exam"
-#     quiz = "quiz"
-#     quick_check = "quick_check"
+from datetime import datetime
+from typing import Optional
 
+from sqlalchemy import (
+    Integer,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import relationship, Mapped, mapped_column
+from sqlalchemy import Enum as SAEnum
 
-# class QuestionType(str, enum.Enum):
-#     mcq = "mcq"
-#     true_false = "true_false"
-#     short_answer = "short_answer"
-#     essay = "essay"
-#     file_upload = "file_upload"
+from app.db.database import Base
+from app.models.base import TimestampMixin
+# from server.app.enums.core import TutorAssignmentStatus
 
-
-# class CertStatus(str, enum.Enum):
-#     issued = "issued"
-#     revoked = "revoked"
-
-
-# class PartnershipStatus(str, enum.Enum):
-#     pending = "pending"
-#     active = "active"
-#     suspended = "suspended"
-#     terminated = "terminated"
-
-
-# class TeamRequestStatus(str, enum.Enum):
-#     pending = "pending"
-#     approved = "approved"
-#     rejected = "rejected"
-
-
-# class NotificationType(str, enum.Enum):
-#     info = "info"
-#     success = "success"
-#     warning = "warning"
-#     error = "error"
-
-
-# class BroadcastType(str, enum.Enum):
-#     all = "all"
-#     students = "students"
-#     tutors = "tutors"
-#     creators = "creators"
-#     partners = "partners"
-#     specific = "specific"
-
-
-# ─── ASSESSMENTS ──────────────────────────────────
-
-# class Assessment(Base, TimestampMixin):
-#     __tablename__ = "assessments"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     title: Mapped[str] = mapped_column(String(255), nullable=False)
-#     description: Mapped[Optional[str]] = mapped_column(Text)
-#     assessment_type: Mapped[str] = mapped_column(SAEnum(AssessmentType), nullable=False)
-#     total_marks: Mapped[float] = mapped_column(Float, default=100.0)
-#     pass_mark: Mapped[float] = mapped_column(Float, default=50.0)
-#     time_limit_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-#     due_date: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-#     is_auto_graded: Mapped[bool] = mapped_column(Boolean, default=True)
-#     show_answers_after: Mapped[bool] = mapped_column(Boolean, default=True)
-#     attempts_allowed: Mapped[int] = mapped_column(Integer, default=1)
-#     shuffle_questions: Mapped[bool] = mapped_column(Boolean, default=False)
-#     course_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("courses.id"), nullable=True)
-#     topic_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("topics.id"), nullable=True)
-#     created_by_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-#     course: Mapped[Optional["Course"]] = relationship("Course", back_populates="assessments")
-#     topic: Mapped[Optional["Topic"]] = relationship("Topic", back_populates="quick_assessments", foreign_keys=[topic_id])
-#     questions: Mapped[List["Question"]] = relationship("Question", back_populates="assessment", cascade="all, delete-orphan")
-#     submissions: Mapped[List["AssessmentSubmission"]] = relationship("AssessmentSubmission", back_populates="assessment")
-
-
-# class Question(Base, TimestampMixin):
-#     __tablename__ = "questions"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     body: Mapped[str] = mapped_column(Text, nullable=False)
-#     question_type: Mapped[str] = mapped_column(SAEnum(QuestionType), nullable=False)
-#     options: Mapped[Optional[dict]] = mapped_column(JSON)
-#     correct_answer: Mapped[Optional[str]] = mapped_column(Text)
-#     explanation: Mapped[Optional[str]] = mapped_column(Text)
-#     marks: Mapped[float] = mapped_column(Float, default=1.0)
-#     order_index: Mapped[int] = mapped_column(Integer, default=0)
-#     assessment_id: Mapped[int] = mapped_column(Integer, ForeignKey("assessments.id"), nullable=False)
-#     assessment: Mapped["Assessment"] = relationship("Assessment", back_populates="questions")
-#     answers: Mapped[List["Answer"]] = relationship("Answer", back_populates="question")
-
-
-# class AssessmentSubmission(Base, TimestampMixin):
-#     __tablename__ = "assessment_submissions"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     status: Mapped[str] = mapped_column(String(50), default="submitted")
-#     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-#     percentage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-#     passed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-#     ai_feedback: Mapped[Optional[str]] = mapped_column(Text)
-#     tutor_feedback: Mapped[Optional[str]] = mapped_column(Text)
-#     attempt_number: Mapped[int] = mapped_column(Integer, default=1)
-#     submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-#     graded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-#     student_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-#     assessment_id: Mapped[int] = mapped_column(Integer, ForeignKey("assessments.id"), nullable=False)
-#     graded_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-#     student: Mapped["User"] = relationship("User", back_populates="assessment_submissions", foreign_keys=[student_id])
-#     assessment: Mapped["Assessment"] = relationship("Assessment", back_populates="submissions")
-#     answers: Mapped[List["Answer"]] = relationship("Answer", back_populates="submission")
-
-
-# class Answer(Base, TimestampMixin):
-#     __tablename__ = "answers"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     response: Mapped[Optional[str]] = mapped_column(Text)
-#     file_path: Mapped[Optional[str]] = mapped_column(String(500))
-#     score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-#     is_correct: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
-#     ai_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-#     ai_feedback: Mapped[Optional[str]] = mapped_column(Text)
-#     question_id: Mapped[int] = mapped_column(Integer, ForeignKey("questions.id"), nullable=False)
-#     submission_id: Mapped[int] = mapped_column(Integer, ForeignKey("assessment_submissions.id"), nullable=False)
-#     question: Mapped["Question"] = relationship("Question", back_populates="answers")
-#     submission: Mapped["AssessmentSubmission"] = relationship("AssessmentSubmission", back_populates="answers")
-
-
-# ─── CERTIFICATES ─────────────────────────────────
-
-# class Certificate(Base, TimestampMixin):
-#     __tablename__ = "certificates"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     cert_number: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
-#     cert_url: Mapped[Optional[str]] = mapped_column(String(500))
-#     status: Mapped[str] = mapped_column(SAEnum(CertStatus), default=CertStatus.issued)
-#     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-#     user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-#     course_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("courses.id"), nullable=True)
-#     path_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("learning_paths.id"), nullable=True)
-#     user: Mapped["User"] = relationship("User", back_populates="certificates")
-#     course: Mapped[Optional["Course"]] = relationship("Course", back_populates="certificates")
-
-
-# ─── SCHEDULES & ATTENDANCE ───────────────────────
-
-# class Schedule(Base, TimestampMixin):
-#     __tablename__ = "schedules"
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     title: Mapped[str] = mapped_column(String(255), nullable=False)
-#     description: Mapped[Optional[str]] = mapped_column(Text)
-#     start_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-#     end_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-#     meeting_link: Mapped[Optional[str]] = mapped_column(String(500))
-#     is_recurring: Mapped[bool] = mapped_column(Boolean, default=False)
-#     recurrence_rule: Mapped[Optional[str]] = mapped_column(String(200))
-#     course_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("courses.id"), nullable=True)
-#     tutor_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-#     course: Mapped[Optional["Course"]] = relationship("Course", back_populates="schedules")
-#     tutor: Mapped[Optional["User"]] = relationship("User", back_populates="schedules_as_tutor", foreign_keys=[tutor_id])
-#     attendance_records: Mapped[List["AttendanceRecord"]] = relationship("AttendanceRecord", back_populates="schedule")
-
-
-# class AttendanceRecord(Base, TimestampMixin):
-#     __tablename__ = "attendance_records"
-#     __table_args__ = (UniqueConstraint("student_id", "schedule_id", name="uq_attendance"),)
-#     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-#     present: Mapped[bool] = mapped_column(Boolean, default=False)
-#     marked_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-#     notes: Mapped[Optional[str]] = mapped_column(String(500))
-#     student_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-#     schedule_id: Mapped[int] = mapped_column(Integer, ForeignKey("schedules.id"), nullable=False)
-#     student: Mapped["User"] = relationship("User", back_populates="attendance_records", foreign_keys=[student_id])
-#     schedule: Mapped["Schedule"] = relationship("Schedule", back_populates="attendance_records")
-
-
-# ─── TUTOR ASSIGNMENTS ────────────────────────────
 
 class TutorAssignment(Base, TimestampMixin):
+    """
+    Scalable tutor assignment model for:
+      - Course tutors
+      - Student-specific tutors
+      - Learning path tutors (optional future scalability)
+
+    Supports:
+      - Admin-assigned tutors
+      - Tutor self-request workflow
+      - Approval/rejection lifecycle
+      - Audit trail & revocation
+    """
+
     __tablename__ = "tutor_assignments"
-    __table_args__ = (UniqueConstraint("tutor_id", "course_id", "student_id", name="uq_tutor_assignment"),)
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tutor_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-    course_id: Mapped[int] = mapped_column(Integer, ForeignKey("courses.id"), nullable=False)
-    student_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
-    assigned_by_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
-    tutor: Mapped["User"] = relationship("User", back_populates="tutor_assignments", foreign_keys=[tutor_id])
-    course: Mapped["Course"] = relationship("Course", back_populates="tutor_assignments")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tutor_id",
+            "course_id",
+            "student_id",
+            name="uq_tutor_assignment",
+        ),
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # PRIMARY KEY
+    # ──────────────────────────────────────────────────────────────────────
+
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TARGETS
+    # Exactly one or more can optionally be assigned
+    # ──────────────────────────────────────────────────────────────────────
+
+    course_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("courses.id"),
+        nullable=True,
+    )
+
+    path_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("learning_paths.id"),
+        nullable=True,
+    )
+
+    student_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # TUTOR INFO
+    # ──────────────────────────────────────────────────────────────────────
+
+    tutor_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+
+    # Admin/user who created the assignment
+    assigned_by_id: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ASSIGNMENT STATE
+    # ──────────────────────────────────────────────────────────────────────
+
+    status: Mapped[TutorAssignmentStatus] = mapped_column(
+        SAEnum(TutorAssignmentStatus),
+        default=TutorAssignmentStatus.pending,
+        nullable=False,
+    )
+
+    admin_assigned: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # AUDIT / CONTEXT
+    # ──────────────────────────────────────────────────────────────────────
+
+    notes: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    rejection_reason: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # ──────────────────────────────────────────────────────────────────────
+    # RELATIONSHIPS
+    # ──────────────────────────────────────────────────────────────────────
+
+    tutor: Mapped["User"] = relationship(
+        "User",
+        back_populates="tutor_assignments",
+        foreign_keys=[tutor_id],
+    )
+
+    assigned_by: Mapped[Optional["User"]] = relationship(
+        "User",
+        foreign_keys=[assigned_by_id],
+    )
+
+    student: Mapped[Optional["User"]] = relationship(
+        "User",
+        foreign_keys=[student_id],
+    )
+
+    course: Mapped[Optional["Course"]] = relationship(
+        "Course",
+        back_populates="tutor_assignments",
+        foreign_keys=[course_id],
+    )
+
+    path: Mapped[Optional["LearningPath"]] = relationship(
+        "LearningPath",
+        back_populates="tutor_assignments",
+        foreign_keys=[path_id],
+    )
 
 
 # ─── FEEDBACK ─────────────────────────────────────

@@ -17,6 +17,7 @@ from app.enums import CourseStatus
 from app.schemas import PathCreate, PathUpdate, SuccessResponse
 from app.api.deps.auth import require_admin, optional_user
 from app import db
+from app.utils.courses import _pricing_fields
 
 router = APIRouter(prefix="/paths", tags=["Learning Paths"])
 logger = logging.getLogger(__name__)
@@ -112,7 +113,8 @@ async def list_paths(
                 "duration_weeks": _calculate_path_duration(p, db),
                 "issues_certificate": p.issues_certificate,
                 "is_enrolled": p.id in enrolled_ids,
-                "available_payment_types": _derive_payment_types(p),
+                # "available_payment_types": _derive_payment_types(p),
+                **_pricing_fields(p),
                 "instructor_led_fee": getattr(p, 'instructor_led_fee', None),
             }
             for p in paths
@@ -122,35 +124,143 @@ async def list_paths(
     }
 
 
-def _derive_payment_types(path: LearningPath) -> List[dict]:
-    """Derive available payment types for a path, matching course behavior."""
-    types = []
+# def _derive_payment_types(path: LearningPath) -> List[dict]:
+#     """Derive available payment types for a path, matching course behavior."""
+#     types = []
 
-    if not path.fee or path.fee == 0:
-        types.append({"payment_type": "free", "fee": 0})
-        return types
+#     if not path.fee or path.fee == 0:
+#         types.append({"payment_type": "free", "fee": 0})
+#         return types
 
-    # Always offer one-time
-    types.append({"payment_type": "one_time", "fee": path.fee})
+#     # Always offer one-time
+#     types.append({"payment_type": "one_time", "fee": path.fee})
 
-    # Subscription if configured
-    if getattr(path, 'subscription_enabled', False):
-        interval = getattr(path, 'subscription_interval', 'monthly')
-        types.append({
-            "payment_type": "subscription",
-            "fee": getattr(path, 'subscription_fee', path.fee * 0.9),
-            "subscription_interval": interval,
-        })
+#     # Subscription if configured
+#     if getattr(path, 'subscription_enabled', False):
+#         interval = getattr(path, 'subscription_interval', 'monthly')
+#         types.append({
+#             "payment_type": "subscription",
+#             "fee": getattr(path, 'subscription_fee', path.fee * 0.9),
+#             "subscription_interval": interval,
+#         })
 
-    # Pay-as-you-go if configured
-    if getattr(path, 'pay_as_you_go_enabled', False):
-        types.append({
-            "payment_type": "pay_as_you_go",
-            "fee": getattr(path, 'pay_as_you_go_fee', path.fee),
-            "access_period_days": getattr(path, 'access_period_days', 30),
-        })
+#     # Pay-as-you-go if configured
+#     if getattr(path, 'pay_as_you_go_enabled', False):
+#         types.append({
+#             "payment_type": "pay_as_you_go",
+#             "fee": getattr(path, 'pay_as_you_go_fee', path.fee),
+#             "access_period_days": getattr(path, 'access_period_days', 30),
+#         })
 
-    return types if types else [{"payment_type": "one_time", "fee": path.fee}]
+#     return types if types else [{"payment_type": "one_time", "fee": path.fee}]
+
+# v2
+# enrollments.py — replace the existing _derive_payment_types function
+#
+# Problem
+# ───────
+# The old function gated subscription and pay_as_you_go on boolean flags
+# (subscription_enabled / pay_as_you_go_enabled) that the AdminPathsPage
+# sets, but were never surfaced to the frontend selector.  More importantly,
+# the intended UX is: if a fee is configured for a billing model, that model
+# is available for the student to choose — no separate boolean needed.
+#
+# Rule applied here (mirrors _build_payment_types for courses):
+#   • payment_type == 'free'          → only "Free" shown, nothing else
+#   • fee > 0                         → "One-time" is available
+#   • subscription_fee > 0            → "Subscription" is available
+#   • pay_as_you_go_fee > 0           → "Pay-as-you-go" is available
+#   • instructor_led_fee > 0          → shown as optional add-on (not a separate pill)
+#
+# This means admins configure pricing by filling in the fee fields, not by
+# toggling booleans.  The boolean columns (subscription_enabled, etc.) are
+# kept for backward compatibility but are no longer load-bearing.
+#
+# Usage: drop this function in to replace _derive_payment_types in
+#        enrollments.py.  It is called by list_paths, get_path_by_slug,
+#        and get_path — all three already pass the path object.
+
+from typing import List  # already imported in enrollments.py
+
+
+# INTERVAL_LABELS = {
+#     "weekly":    "Weekly",
+#     "monthly":   "Monthly",
+#     "quarterly": "Quarterly",
+#     "yearly":    "Yearly",
+# }
+
+
+# def _derive_payment_types(path) -> List[dict]:
+#     """
+#     Return every billing option the student may choose for this path.
+
+#     Each entry shape:
+#         {
+#             "payment_type":          str,
+#             "fee":                   float,          # actual charge for this model
+#             "subscription_interval": str | None,
+#             "access_period_days":    int | None,
+#             "label":                 str,
+#         }
+#     """
+
+#     # ── Free path — nothing else offered ────────────────────────────────
+#     pt = getattr(path, "payment_type", None) or "one_time"
+#     if pt == "free":
+#         return [{"payment_type": "free", "fee": 0, "label": "Free",
+#                  "subscription_interval": None, "access_period_days": None}]
+
+#     options: list = []
+
+#     # ── One-time ─────────────────────────────────────────────────────────
+#     one_time_fee = float(getattr(path, "fee", None) or 0)
+#     if one_time_fee > 0:
+#         options.append({
+#             "payment_type":          "one_time",
+#             "fee":                   one_time_fee,
+#             "label":                 "One-time",
+#             "subscription_interval": None,
+#             "access_period_days":    None,
+#         })
+
+#     # ── Subscription ─────────────────────────────────────────────────────
+#     sub_fee = float(getattr(path, "subscription_fee", None) or 0)
+#     if sub_fee > 0:
+#         interval = (getattr(path, "subscription_interval", None) or "monthly").lower()
+#         options.append({
+#             "payment_type":          "subscription",
+#             "fee":                   sub_fee,
+#             "label":                 INTERVAL_LABELS.get(interval, "Subscription"),
+#             "subscription_interval": interval,
+#             "access_period_days":    None,
+#         })
+
+#     # ── Pay-as-you-go ────────────────────────────────────────────────────
+#     payg_fee = float(getattr(path, "pay_as_you_go_fee", None) or 0)
+#     if payg_fee > 0:
+#         access_days = int(getattr(path, "access_period_days", None) or 30)
+#         options.append({
+#             "payment_type":          "pay_as_you_go",
+#             "fee":                   payg_fee,
+#             "label":                 "Pay-as-you-go",
+#             "subscription_interval": None,
+#             "access_period_days":    access_days,
+#         })
+
+#     # ── Fallback — path has fee but no specific options resolved ─────────
+#     # e.g. payment_type='one_time' but fee column is 0 (misconfigured).
+#     # Return a single option so the UI never shows nothing.
+#     if not options:
+#         options.append({
+#             "payment_type":          pt,
+#             "fee":                   one_time_fee,
+#             "label":                 {"one_time": "One-time"}.get(pt, pt),
+#             "subscription_interval": None,
+#             "access_period_days":    None,
+#         })
+
+#     return options
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -204,7 +314,8 @@ async def get_path_by_slug(
         "courses_count": len(path.courses),
         "lessons_count": stats["lessons_count"],
         "topics_count": stats["topics_count"],
-        "available_payment_types": _derive_payment_types(path),
+        # "available_payment_types": _derive_payment_types(path),
+        **_pricing_fields(path),
         "instructor_led_fee": getattr(path, 'instructor_led_fee', 0),
         "what_you_achieve": getattr(path, 'what_you_achieve', None),
         "creator": {
@@ -274,7 +385,8 @@ async def get_path(
         "courses_count": len(path.courses),
         "lessons_count": stats["lessons_count"],
         "topics_count": stats["topics_count"],
-        "available_payment_types": _derive_payment_types(path),
+        # "available_payment_types": _derive_payment_types(path),
+        **_pricing_fields(path),
         "instructor_led_fee": getattr(path, 'instructor_led_fee', 0),
         "courses": [
             {
@@ -315,13 +427,15 @@ async def create_path(
         issues_certificate=payload.issues_certificate,
         duration_weeks=payload.duration_weeks,
         instructor_led_fee=payload.instructor_led_fee,
-        subscription_enabled=payload.subscription_enabled,
+        subscription_enabled=payload.subscription_enabled or False,
         subscription_interval=payload.subscription_interval,
         subscription_fee=payload.subscription_fee,
         pay_as_you_go_enabled=payload.pay_as_you_go_enabled,
         pay_as_you_go_fee=payload.pay_as_you_go_fee,
-        access_period_days=payload.access_period_days,
+        access_period_days=payload.access_period_days or 30,
         what_you_achieve=payload.what_you_achieve,
+
+        # installment not on LearningPath model yet — add columns if needed
     )
 
     if payload.course_ids:
@@ -354,6 +468,9 @@ async def update_path(
     update_data = payload.model_dump(exclude_none=True, exclude={"course_ids"})
     for k, v in update_data.items():
         setattr(path, k, v)
+    #     # The current update_path already does this generically — it will
+    #     # automatically persist any fields present in the payload schema and
+    #     # model, so no further changes are needed there.
 
     # Update courses if provided
     if payload.course_ids is not None:

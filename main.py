@@ -97,6 +97,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Database setup issue: {e}")
     
+    # check oauth config
+    if not app_config.oauth_provider_config:
+        logger.warning("No OAuth providers enabled — add APP_*_CLIENT_ID / APP_*_CLIENT_SECRET to .env")
+    else:
+        logger.info(f"OAuth providers active: {list(app_config.oauth_provider_config.keys())}")
+    
     yield
     logger.info("Shutdown complete.")
 
@@ -166,6 +172,7 @@ if app_config.general_config.development_mode and not _cors_origins:
     _cors_origins = ["*"]
 
 logger.info("CORS allowed origins: %s", _cors_origins)
+logger.info("App db uri %s", app_config.database_config.sql_connection_string)
 
 app.add_middleware(
     CORSMiddleware,
@@ -211,7 +218,7 @@ app.include_router(v1_router)
 
 # ── Entrypoint ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", app_config.hosting_config.port))
+    port = int(os.getenv("APP_PORT", app_config.hosting_config.port))
     
     # PRODUCTION: bind to 0.0.0.0 so Docker/nginx can reach us
     # DEVELOPMENT: localhost is fine

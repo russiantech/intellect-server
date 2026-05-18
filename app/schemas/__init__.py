@@ -11,6 +11,7 @@ Import from here:  from app.schemas import AssessmentCreate, QuizCreate, ...
 from app.schemas.auth import *
 from app.schemas.users import *
 from app.schemas.courses import *
+from app.schemas.categories import *
 from app.schemas.enrollments import *
 from app.schemas.payments import *
 from app.schemas.social import *
@@ -49,7 +50,7 @@ from app.schemas.projects import (
     AttendanceSelfCheckIn,
 )
 
-# ── Legacy assessment schemas (kept for backwards compat) ─────────
+# ── Lesson assessment schemas (kept for backwards compat) ─────────
 from app.schemas.legacy_assessments import (
     LegacyAssessmentCreate,
     LegacyAssessmentUpdate,

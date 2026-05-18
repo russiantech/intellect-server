@@ -32,6 +32,14 @@ course_category_assoc = Table(
     Column("category_id", Integer, ForeignKey("categories.id"), primary_key=True),
 )
 
+# 
+path_category_assoc = Table(
+      "path_category_assoc",
+      Base.metadata,
+      Column("path_id",     Integer, ForeignKey("learning_paths.id"), primary_key=True),
+      Column("category_id", Integer, ForeignKey("categories.id"),     primary_key=True),
+  )
+
 path_course_assoc = Table(
     "path_course_assoc", Base.metadata,
     Column("path_id", Integer, ForeignKey("learning_paths.id"), primary_key=True),

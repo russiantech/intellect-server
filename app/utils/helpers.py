@@ -26,3 +26,4 @@ def get_client_ip(request: Request) -> str:
     
     # Fallback to direct client host
     return request.client.host if request.client else "unknown"
+

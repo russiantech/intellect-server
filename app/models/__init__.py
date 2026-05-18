@@ -17,7 +17,7 @@ from app.models.base import TimestampMixin
 # ── Users ─────────────────────────────────────────────────────────
 from app.models.users import (
     user_role_assoc,
-    Role, User, EmailToken,
+    Role, User, EmailToken, OAuthAccount,
 )
 
 # ── Courses ───────────────────────────────────────────────────────
@@ -53,6 +53,7 @@ from app.models.association_tables import (
     user_role_assoc,
     course_tag_assoc,
     course_category_assoc,
+    path_category_assoc,
     path_course_assoc,
     user_topic_progress,
     partner_course_assoc,
@@ -75,7 +76,7 @@ __all__ = [
 
     # Users
     "user_role_assoc",
-    "Role", "User", "EmailToken",
+    "Role", "User", "EmailToken", "OAuthAccount",
 
     # Courses
     "Category", "Tag", "SubscriptionPlan",
@@ -107,6 +108,6 @@ __all__ = [
 
     # Association tables
     "course_tag_assoc", "course_category_assoc",
-    "path_course_assoc", "user_topic_progress",
+    "path_category_assoc", "path_course_assoc", "user_topic_progress",
     "partner_course_assoc", "partner_path_assoc",
 ]

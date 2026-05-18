@@ -16,6 +16,7 @@ Design rules
 from app.enums.core import (
     # Users
     UserRole,
+    TutorAssignmentStatus,
     # Courses
     CourseStatus,
     CourseLevel,
@@ -49,6 +50,7 @@ from app.enums.assessments import (
 __all__ = [
     # ── Core ──────────────────────────────────────────────────────
     "UserRole",
+    "TutorAssignmentStatus",
     "CourseStatus",
     "CourseLevel",
     "ContentType",

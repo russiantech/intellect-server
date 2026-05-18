@@ -3,35 +3,21 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 
 from app.enums import (
-    CourseStatus, CourseLevel, ContentType, PaymentType, SubscriptionInterval,
+    CourseStatus, CourseLevel, ContentType, 
+    PaymentType, SubscriptionInterval,
 )
+from app.schemas.categories import CategoryOut
 
-# ── Category & Tag ────────────────────────────────────────────────────────────
+class TutorAssignRequest(BaseModel):
+    tutor_id: int
+    course_id:     Optional[int] = None
+    path_id:       Optional[int] = None
+    student_id:       Optional[int] = None
+    notes:         Optional[str] = None
 
-class CategoryCreate(BaseModel):
-    title: str = Field(..., max_length=100)
-    description: Optional[str] = None
-    image: Optional[str] = None
-    icon: Optional[str] = None
-
-
-class CategoryUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    image: Optional[str] = None
-    icon: Optional[str] = None
-
-
-class CategoryOut(BaseModel):
-    id: int
-    title: str
-    description: Optional[str] = None
-    image: Optional[str] = None
-    icon: Optional[str] = None
-    slug: Optional[str] = None
-
-    class Config:
-        from_attributes = True
+class TutorAssignmentReview(BaseModel):
+    approved:         bool
+    rejection_reason: Optional[str] = None
 
 
 class TagCreate(BaseModel):
@@ -131,53 +117,118 @@ class CourseCreate(BaseModel):
         return v
 
 
+# class CourseUpdate(BaseModel):
+#     title: Optional[str] = None
+#     description: Optional[str] = None
+#     short_description: Optional[str] = None
+#     fee: Optional[float] = None
+#     payment_type: Optional[PaymentType] = None
+#     subscription_interval: Optional[SubscriptionInterval] = None
+#     subscription_installments: Optional[int] = None
+#     lang: Optional[str] = None
+#     duration_weeks: Optional[int] = None
+#     level: Optional[CourseLevel] = None
+#     requirements: Optional[str] = None
+#     what_you_learn: Optional[str] = None
+#     throttle_enabled: Optional[bool] = None
+#     weekly_topic_limit: Optional[int] = None
+#     monthly_topic_limit: Optional[int] = None
+#     category_ids: Optional[List[int]] = None
+#     tag_ids: Optional[List[int]] = None
+#     preview_video: Optional[str] = None
+#     creator_pct: Optional[float] = Field(None, ge=0, le=100)
+#     featured: Optional[bool] = None
+#     status: Optional[CourseStatus] = None
+#     # Instructor-led fee
+#     instructor_led_fee: Optional[float] = Field(
+#         None,
+#         ge=0,
+#         description=(
+#             "Extra fee for instructor-led mode. 0 = feature disabled. "
+#             "Admin sets this per course; students can opt in on CourseDetail."
+#         ),
+#     )
+#     access_period_days: Optional[int] = Field(
+#         30,
+#         ge=1,
+#         description=(
+#             "Days of access bought by each pay-as-you-go payment. "
+#             "Only used when payment_type = pay_as_you_go."
+#         ),
+#     )
+
+#     @field_validator("subscription_interval", "preview_video", mode="before")
+#     @classmethod
+#     def empty_str_to_none(cls, v):
+#         if v == "":
+#             return None
+#         return v
+
+# v2
 class CourseUpdate(BaseModel):
+    # ── Core metadata ─────────────────────────────
     title: Optional[str] = None
     description: Optional[str] = None
     short_description: Optional[str] = None
-    fee: Optional[float] = None
-    payment_type: Optional[PaymentType] = None
-    subscription_interval: Optional[SubscriptionInterval] = None
-    subscription_installments: Optional[int] = None
     lang: Optional[str] = None
     duration_weeks: Optional[int] = None
     level: Optional[CourseLevel] = None
     requirements: Optional[str] = None
     what_you_learn: Optional[str] = None
-    throttle_enabled: Optional[bool] = None
-    weekly_topic_limit: Optional[int] = None
-    monthly_topic_limit: Optional[int] = None
-    category_ids: Optional[List[int]] = None
-    tag_ids: Optional[List[int]] = None
     preview_video: Optional[str] = None
-    creator_pct: Optional[float] = Field(None, ge=0, le=100)
-    featured: Optional[bool] = None
-    status: Optional[CourseStatus] = None
-    # Instructor-led fee
+
+    # ── Legacy / base pricing ─────────────────────
+    fee: Optional[float] = None
+    payment_type: Optional[PaymentType] = None
+
+    # ── Subscription model ────────────────────────
+    subscription_fee: Optional[float] = None
+    subscription_enabled: Optional[bool] = None
+    subscription_interval: Optional[SubscriptionInterval] = None
+    subscription_installments: Optional[int] = None
+
+    # ── Pay-as-you-go model ───────────────────────
+    pay_as_you_go_fee: Optional[float] = None
+    pay_as_you_go_enabled: Optional[bool] = None
+    access_period_days: Optional[int] = Field(
+        None,
+        ge=1,
+        description="Days of access per PAYG payment"
+    )
+
+    # ── Installment model ─────────────────────────
+    installment_enabled: Optional[bool] = None
+    installment_count: Optional[int] = None
+    installment_fee: Optional[float] = None
+
+    # ── Instructor-led add-on ─────────────────────
     instructor_led_fee: Optional[float] = Field(
         None,
         ge=0,
-        description=(
-            "Extra fee for instructor-led mode. 0 = feature disabled. "
-            "Admin sets this per course; students can opt in on CourseDetail."
-        ),
-    )
-    access_period_days: Optional[int] = Field(
-        30,
-        ge=1,
-        description=(
-            "Days of access bought by each pay-as-you-go payment. "
-            "Only used when payment_type = pay_as_you_go."
-        ),
+        description="Extra fee for instructor-led mode"
     )
 
+    # ── Throttling / limits ───────────────────────
+    throttle_enabled: Optional[bool] = None
+    weekly_topic_limit: Optional[int] = None
+    monthly_topic_limit: Optional[int] = None
+
+    # ── Classification ────────────────────────────
+    category_ids: Optional[List[int]] = None
+    tag_ids: Optional[List[int]] = None
+    featured: Optional[bool] = None
+    status: Optional[CourseStatus] = None
+
+    # ── Revenue share ─────────────────────────────
+    creator_pct: Optional[float] = Field(None, ge=0, le=100)
+
+    # ── Cleanup helper ────────────────────────────
     @field_validator("subscription_interval", "preview_video", mode="before")
     @classmethod
     def empty_str_to_none(cls, v):
         if v == "":
             return None
         return v
-
 
 class CourseApproval(BaseModel):
     approved: bool
@@ -509,10 +560,10 @@ class MarkAttendance(BaseModel):
     present: bool = True
 
 
-class TutorAssignRequest(BaseModel):
-    tutor_id: int
-    course_id: int
-    student_id: Optional[int] = None
+# class TutorAssignRequest(BaseModel):
+#     tutor_id: int
+#     course_id: int
+#     student_id: Optional[int] = None
 
 
 # ── Feedback ──────────────────────────────────────────────────────────────────

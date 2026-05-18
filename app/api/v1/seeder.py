@@ -238,7 +238,7 @@
 for description:
 
 Generate 2 convincing professional course descriptions simplified and convincing based on contexts, 
-brief and extended versions
+brief and extended versions.
 
 for lessons:
 
@@ -563,7 +563,6 @@ course_data_AI_Tools_Mastery = {
   ]
 }
 
-
 course_data_Cryptography={
     "title":"Cryptography",
     "lessons": [
@@ -643,7 +642,6 @@ course_data_Cryptography={
 ]
 
 }
-
 
 course_data_Android_Development={
     
@@ -762,7 +760,6 @@ course_data_Android_Development={
     ]
 }
 
-
 course_data_Software_engineering={
 
   "title": "Software Engineering",
@@ -832,7 +829,7 @@ course_data_Software_engineering={
   ]
 }
 
-course_data={
+course_data_Big_Data_Analytics={
 "title": "Big Data Analytics",
   "lessons": [
     {
@@ -898,6 +895,424 @@ course_data={
       ]
     }
   ]
+}
+
+course_data_SQL = {
+  "title": "SQL",
+  "lessons": [
+    {
+      "title": "The World Of Database",
+      "topics": [
+        "Introduction to DBMS",
+        "Entity Relationship Diagram",
+        "Let’s Revise",
+      ]},
+    
+    {
+       "title": "Working with Databases",
+      "topics":[
+        "Understanding ER",
+        "Some Database Terminologies",
+        "Summary"
+      ]
+    },
+    
+    {
+      "title": "Introduction to Tables",
+      "topics": [
+        "What Are Tables?",
+        "Working with Tables",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Keys in SQL",
+      "topics": [
+        "Need for Keys",
+        "Key Types in SQL",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Applications of SQL",
+      "topics": [
+        "Real-time Applications",
+        "The Power of SQL",
+        "Recap"
+      ]
+    },
+    {
+      "title": "Queries in SQL",
+      "topics": [
+        "Introduction to Queries",
+        "More on Queries",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "SQL Statements",
+      "topics": [
+        "Basic SQL Syntax",
+        "Working with Sub-Queries",
+        "Recap"
+      ]
+    },
+    {
+      "title": "Clauses and Views in SQL",
+      "topics": [
+        "Clauses and Views",
+        "Working with Clauses and Views",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "SQL Constraints",
+      "topics": [
+        "Working with Constraints",
+        "More on Constraints",
+        "Recap"
+      ]
+    },
+    {
+      "title": "Operators in SQL",
+      "topics": [
+        "What are Operators?",
+        "More on Operators",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Core SQL Concepts",
+      "topics": [
+        "Triggers and JOINS",
+        "SQL Injection",
+        "Recap"
+      ]
+    },
+    {
+      "title": "To Conclude",
+      "topics": [
+        "Wrapping it up",
+        "The Assessment",
+        "Final Round-up"
+      ]
+    }
+  ]
+}
+
+course_data_PostgreSQL = {
+"title": "PostgreSQL",
+"lessons": [
+{
+"title": "Introduction to PostgreSQL",
+"topics": [
+"What is PostgreSQL?",
+"More on PostgreSQL",
+"Recap"
+]
+},
+{
+"title": "How to install PostgreSQL",
+"topics": [
+"Installing PostgreSQL",
+"Connecting to Database Server",
+"Recap"
+]
+},
+{
+"title": "All about Database",
+"topics": [
+"Creating PostgreSQL Database",
+"Selecting PostgreSQL Database",
+"Dropping a Database",
+"Let’s Revise"
+]
+},
+{
+"title": "Data Types in PostgreSQL",
+"topics": [
+"Boolean & Character Data type",
+"Numeric Data type",
+"Date & Time Data type",
+"Let’s Revise"
+]
+},
+{
+"title": "Structuring Table",
+"topics": [
+"How to Create a table?",
+"Creating your first table in PostgreSQL",
+"Recap"
+]
+},
+{
+"title": "PostgreSQL Queries",
+"topics": [
+"Inserting Data",
+"Fetching Data",
+"Quiz Time"
+]
+},
+{
+"title": "Some PostgreSQL Clauses",
+"topics": [
+"Where Clause",
+"AND & OR Clauses",
+"Order By Clause",
+"Let’s Revise"
+]
+},
+{
+"title": "More on Queries",
+"topics": [
+"Modifying the table",
+"Delete Query",
+"Let’s Revise"
+]
+},
+{
+"title": "PostgreSQL Alter table",
+"topics": [
+"What is Alter table?",
+"Implementing Alter table commands",
+"Let’s Revise"
+]
+}
+]
+}
+
+course_data_RDBMS={
+  "title": "RDBMS",
+  "lessons": [
+    {
+      "title": "Introduction to RDBMS",
+      "topics": [
+        "Introduction to RDBMS",
+        "History of RDBMS",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Advantages and Features of RDBMS",
+      "topics": [
+        "Advantages of RDBMS",
+        "How does RDBMS make our life easy?",
+        "Some important features of RDBMS",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "ER Model",
+      "topics": [
+        "Introduction to ER-Model",
+        "Components of ER Model",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Attributes in ER Model",
+      "topics": [
+        "More about Attributes",
+        "Let’s Revise",
+        "Types of Attributes"
+      ]
+    },
+    {
+      "title": "Relations in ER Model",
+      "topics": [
+        "More about Relations",
+        "Degree of Relations",
+        "Types of Relations",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Tables in RDBMS",
+      "topics": [
+        "Introduction to Tables",
+        "Terms Related to Tables",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Keys in RDBMS",
+      "topics": [
+        "Need for keys in RDBMS",
+        "Types of Keys in RDBMS",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Normalization of Tables",
+      "topics": [
+        "Introduction to Normalization",
+        "Types of Normalization",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Codd’s Rule for RDBMS",
+      "topics": [
+        "Codd’s Rules",
+        "Let’s Revise"
+      ]
+    }
+  ]
+}
+
+course_data_MongoDB={
+  "title": "MongoDB",
+  "lessons": [
+    {
+      "title": "Introduction to MongoDB",
+      "topics": [
+        "What is MongoDB?",
+        "Why and Where is MongoDB Used?",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "What is NoSQL?",
+      "topics": [
+        "Data and database Management System",
+        "Different Database Management Systems",
+        "NoSQL… Not Only SQL!",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Let’s see how to install MongoDB",
+      "topics": [
+        "What you will need?",
+        "Launch MongoDB",
+        "Let’s Revise",
+        "PRO"
+      ]
+    },
+    {
+      "title": "Database through Documents and Collections in MongoDB",
+      "topics": [
+        "Difference between Database Collections and Documents in MongoDB",
+        "Document in MongoDB",
+        "Collection in MongoDB",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "JSON and BSON! The difference",
+      "topics": [
+        "What is JSON?",
+        "What is BSON?",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Time to Create and Drop databases and collections!",
+      "topics": [
+        "How to create a database in MongoDB?",
+        "How to drop a database in MongoDB?",
+        "Creating a collection",
+        "Creating a collection automatically the MongoDB way!",
+        "Dropping a collection from MongoDB",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Time for some CURD!",
+      "topics": [
+        "Insert Document",
+        "Update Document",
+        "Delete documents",
+        "Query documents in MongoDB",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Data types in MongoDB",
+      "topics": [
+        "Different data types supported in MongoDB",
+        "String and Numbers in MongoDB",
+        "Date and Array data types in MongoDB",
+        "Boolean and ObjectId data types in MongoDB",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Query Modifiers in MongoDB",
+      "topics": [
+        "Limit() method in MongoDB",
+        "Skip() method in MongoDB",
+        "Let’s Revise"
+      ]
+    }
+  ]
+}
+
+course_data={
+"title": "Redis",
+"lessons": [
+{
+"title": "Getting Started With Redis",
+"topics": [
+"Overview Of Redis",
+"Why Redis?",
+"Recap"
+]
+},
+{
+"title": "Environment Setup",
+"topics": [
+"Installing Redis",
+"Redis Configuration",
+"Recap"
+]
+},
+{
+"title": "Data Types In Redis",
+"topics": [
+"Working With Strings",
+"Redis Lists",
+"What Are Sets?",
+"Hashes In Redis",
+"Quiz",
+"PRO"
+]
+},
+{
+"title": "Redis Commands",
+"topics": [
+"Strings Commands",
+"Lists Commands",
+"Sets Commands in Redis",
+"Redis Hash Commands",
+"Let’s Revise"
+]
+},
+{
+"title": "Sorting And Communication Commands",
+"topics": [
+"Sorting In Redis",
+"Redis Publish/Subscribe",
+"Recap"
+]
+},
+{
+"title": "Transactions In Redis",
+"topics": [
+"Understanding Transactions",
+"Transaction Commands",
+"Let's Revise"
+]
+},
+{
+"title": "Scripting And Connections",
+"topics": [
+"Redis Scripting",
+"Connection in Redis",
+"Recap"
+]
+}
+]
 }
 
 # -----------------------------

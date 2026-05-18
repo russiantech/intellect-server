@@ -88,6 +88,10 @@ from app.services.email_service import send_course_approved_email, send_course_r
 from app.core.config import get_app_config
 from slugify import slugify
 
+from app.utils.courses import _pricing_fields
+
+# from app.utils.courses import _build_payment_types, _pricing_fields
+
 router = APIRouter(prefix="/courses", tags=["Courses"])
 logger = logging.getLogger(__name__)
 
@@ -601,90 +605,258 @@ def _mini_user(user: User) -> dict:
         "title": user.title,
     }
 
-# +++++++++++++++++++
-# courses.py — _course_dict and _build_payment_types
+# v2
+# # +++++++++++++++++++
+# # courses.py — _course_dict and _build_payment_types
+# #
+# # PATCH — drop these two functions in to replace the existing _course_dict.
+# # The rest of the file is unchanged.
+# #
+# # What changed and why
+# # ─────────────────────────────────────────────────────────────────────────
+# # 1. available_payment_types is now built and returned.
+# #    The frontend's derivePaymentOptions() always prefers this array; without
+# #    it the fallback had to guess fees from the single `fee` field, which is
+# #    0 for subscription/PAYG courses that store the real fee in a separate
+# #    column (subscription_fee / pay_as_you_go_fee).
+# #
+# # 2. subscription_fee, pay_as_you_go_fee, access_period_days,
+# #    instructor_led_fee are all returned as top-level fields so the frontend
+# #    can also read them directly when building its own UI (price blocks,
+# #    "includes" list, billing descriptions, etc.).
+# #
+# # 3. _build_payment_types is a pure helper that reads exactly the columns
+# #    each payment model actually uses — no cross-type fee leakage.
+# # ─────────────────────────────────────────────────────────────────────────
+
+# from typing import Optional
+# # (existing imports already present in the file — shown here for context only)
+
+
+# def _build_payment_types(course) -> list:
+#     """
+#     Build the available_payment_types list consumed by the frontend
+#     PaymentTypeSelector.  Each entry's `fee` is the actual charge amount
+#     for that billing model, not the generic `course.fee` column.
+#     """
+#     pt = course.payment_type or "one_time"
+
+#     if pt == "free":
+#         return [{"payment_type": "free", "fee": 0, "label": "Free"}]
+
+#     if pt == "one_time":
+#         return [{
+#             "payment_type": "one_time",
+#             "fee":           float(course.fee or 0),
+#             "label":         "One-time",
+#         }]
+
+#     if pt == "subscription":
+#         # Use subscription_fee when set; fall back to fee
+#         sub_fee  = float(
+#             getattr(course, "subscription_fee", None)
+#             or course.fee
+#             or 0
+#         )
+#         interval = (course.subscription_interval or "monthly").lower()
+#         label    = interval.capitalize() + "ly"   # "monthly" → "Monthly" → "Monthlyly"
+#         # Better: map known intervals
+#         label_map = {
+#             "weekly": "Weekly", "monthly": "Monthly",
+#             "quarterly": "Quarterly", "yearly": "Yearly",
+#         }
+#         label = label_map.get(interval, label)
+#         return [{
+#             "payment_type":          "subscription",
+#             "fee":                   sub_fee,
+#             "subscription_interval": interval,
+#             "label":                 label,
+#         }]
+
+#     if pt == "pay_as_you_go":
+#         payg_fee   = float(
+#             getattr(course, "pay_as_you_go_fee", None)
+#             or course.fee
+#             or 0
+#         )
+#         access_days = int(getattr(course, "access_period_days", None) or 30)
+#         return [{
+#             "payment_type":       "pay_as_you_go",
+#             "fee":                payg_fee,
+#             "access_period_days": access_days,
+#             "label":              "Pay-as-you-go",
+#         }]
+
+#     # Unknown type — return as-is
+#     return [{"payment_type": pt, "fee": float(course.fee or 0), "label": pt}]
+
+
+# def _course_dict(course, user: Optional = None) -> dict:
+#     enrollment = None
+#     if user:
+#         enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
+
+#     avg_rating = None
+#     if course.feedbacks:
+#         avg_rating = round(
+#             sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
+#         )
+
+#     return {
+#         "id":                        course.id,
+#         "title":                     course.title,
+#         "slug":                      course.slug,
+#         "description":               course.description,
+#         "short_description":         course.short_description,
+#         "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
+#         "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
+
+#         # ── Payment fields ────────────────────────────────────────────────────
+#         # fee          = the generic / base price column (used for one_time)
+#         # subscription_fee   = per-period fee for subscription billing
+#         # pay_as_you_go_fee  = per-window fee for PAYG billing
+#         # instructor_led_fee = optional uplift when student opts into live sessions
+#         # access_period_days = number of days unlocked by one PAYG payment
+#         #
+#         # available_payment_types is pre-built so the frontend pill-switcher
+#         # can render correctly without extra API calls.
+#         "fee":                       float(course.fee or 0),
+#         "payment_type":              course.payment_type,
+#         "subscription_interval":     course.subscription_interval,
+#         "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
+#         "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
+#         "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
+#         "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
+#         "available_payment_types":   _build_payment_types(course),
+#         # ─────────────────────────────────────────────────────────────────────
+
+#         "subscription_installments": course.subscription_installments,
+#         "lang":                      course.lang,
+#         "duration_weeks":            course.duration_weeks,
+#         "level":                     course.level,
+#         "status":                    course.status,
+#         "views":                     course.views,
+#         "featured":                  course.featured,
+#         "requirements":              course.requirements,
+#         "what_you_learn":            course.what_you_learn,
+#         "creator_pct":               course.creator_pct,
+#         "platform_pct":              course.platform_pct,
+#         "creator_id":                course.creator_id,
+#         "throttle_enabled":          course.throttle_enabled,
+#         "weekly_topic_limit":        course.weekly_topic_limit,
+#         "monthly_topic_limit":       course.monthly_topic_limit,
+#         "creator":                   _mini_user(course.creator) if course.creator else None,
+#         "categories":                [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
+#         "tags":                      [{"id": t.id, "name": t.name} for t in course.tags],
+#         "lessons_count":             len(course.lessons),
+#         "topics_count":              sum(len(l.topics) for l in course.lessons),
+#         "enrolled_count":            len(course.enrollments),
+#         "avg_rating":                avg_rating,
+#         "is_enrolled":               enrollment is not None,
+#         "progress_pct":              enrollment.progress_pct if enrollment else 0.0,
+#         "created_at":                course.created_at,
+#         "approved_at":               course.approved_at,
+#         "rejection_reason":          course.rejection_reason,
+#     }
+
+# # +++++++++++++++++++
+
+# v3
+# courses.py — replace _build_payment_types AND _course_dict
 #
-# PATCH — drop these two functions in to replace the existing _course_dict.
-# The rest of the file is unchanged.
+# Problem
+# ───────
+# _build_payment_types returned only ONE option (the course's primary
+# payment_type).  If a course has fee=5000 AND subscription_fee=2000 set,
+# only the primary type was shown.  Students had no way to choose.
 #
-# What changed and why
-# ─────────────────────────────────────────────────────────────────────────
-# 1. available_payment_types is now built and returned.
-#    The frontend's derivePaymentOptions() always prefers this array; without
-#    it the fallback had to guess fees from the single `fee` field, which is
-#    0 for subscription/PAYG courses that store the real fee in a separate
-#    column (subscription_fee / pay_as_you_go_fee).
+# Fix — same rule as _derive_payment_types for paths:
+#   fee > 0              → "One-time" available
+#   subscription_fee > 0 → "Subscription" available
+#   pay_as_you_go_fee > 0→ "Pay-as-you-go" available
+#   payment_type='free'  → only "Free", nothing else
 #
-# 2. subscription_fee, pay_as_you_go_fee, access_period_days,
-#    instructor_led_fee are all returned as top-level fields so the frontend
-#    can also read them directly when building its own UI (price blocks,
-#    "includes" list, billing descriptions, etc.).
-#
-# 3. _build_payment_types is a pure helper that reads exactly the columns
-#    each payment model actually uses — no cross-type fee leakage.
-# ─────────────────────────────────────────────────────────────────────────
-
-from typing import Optional
-# (existing imports already present in the file — shown here for context only)
+# _course_dict is updated to include all fee columns so the frontend
+# pill-switcher can render the correct price for each option.
 
 
-def _build_payment_types(course) -> list:
-    """
-    Build the available_payment_types list consumed by the frontend
-    PaymentTypeSelector.  Each entry's `fee` is the actual charge amount
-    for that billing model, not the generic `course.fee` column.
-    """
-    pt = course.payment_type or "one_time"
+# INTERVAL_LABELS = {
+#     "weekly":    "Weekly",
+#     "monthly":   "Monthly",
+#     "quarterly": "Quarterly",
+#     "yearly":    "Yearly",
+# }
 
-    if pt == "free":
-        return [{"payment_type": "free", "fee": 0, "label": "Free"}]
 
-    if pt == "one_time":
-        return [{
-            "payment_type": "one_time",
-            "fee":           float(course.fee or 0),
-            "label":         "One-time",
-        }]
+# def _build_payment_types(course) -> list:
+#     """
+#     Return all billing options available to students for this course.
+#     Each entry:
+#         {
+#             "payment_type":          str,
+#             "fee":                   float,
+#             "subscription_interval": str | None,
+#             "access_period_days":    int | None,
+#             "label":                 str,
+#         }
+#     """
+#     pt = getattr(course, "payment_type", None) or "one_time"
 
-    if pt == "subscription":
-        # Use subscription_fee when set; fall back to fee
-        sub_fee  = float(
-            getattr(course, "subscription_fee", None)
-            or course.fee
-            or 0
-        )
-        interval = (course.subscription_interval or "monthly").lower()
-        label    = interval.capitalize() + "ly"   # "monthly" → "Monthly" → "Monthlyly"
-        # Better: map known intervals
-        label_map = {
-            "weekly": "Weekly", "monthly": "Monthly",
-            "quarterly": "Quarterly", "yearly": "Yearly",
-        }
-        label = label_map.get(interval, label)
-        return [{
-            "payment_type":          "subscription",
-            "fee":                   sub_fee,
-            "subscription_interval": interval,
-            "label":                 label,
-        }]
+#     # Free course — nothing else
+#     if pt == "free":
+#         return [{"payment_type": "free", "fee": 0, "label": "Free",
+#                  "subscription_interval": None, "access_period_days": None}]
 
-    if pt == "pay_as_you_go":
-        payg_fee   = float(
-            getattr(course, "pay_as_you_go_fee", None)
-            or course.fee
-            or 0
-        )
-        access_days = int(getattr(course, "access_period_days", None) or 30)
-        return [{
-            "payment_type":       "pay_as_you_go",
-            "fee":                payg_fee,
-            "access_period_days": access_days,
-            "label":              "Pay-as-you-go",
-        }]
+#     options: list = []
 
-    # Unknown type — return as-is
-    return [{"payment_type": pt, "fee": float(course.fee or 0), "label": pt}]
+#     # One-time
+#     one_time_fee = float(getattr(course, "fee", None) or 0)
+#     if one_time_fee > 0:
+#         options.append({
+#             "payment_type":          "one_time",
+#             "fee":                   one_time_fee,
+#             "label":                 "One-time",
+#             "subscription_interval": None,
+#             "access_period_days":    None,
+#         })
 
+#     # Subscription
+#     sub_fee = float(getattr(course, "subscription_fee", None) or 0)
+#     if sub_fee > 0:
+#         interval = (getattr(course, "subscription_interval", None) or "monthly").lower()
+#         options.append({
+#             "payment_type":          "subscription",
+#             "fee":                   sub_fee,
+#             "label":                 INTERVAL_LABELS.get(interval, "Subscription"),
+#             "subscription_interval": interval,
+#             "access_period_days":    None,
+#         })
+
+#     # Pay-as-you-go
+#     payg_fee = float(getattr(course, "pay_as_you_go_fee", None) or 0)
+#     if payg_fee > 0:
+#         access_days = int(getattr(course, "access_period_days", None) or 30)
+#         options.append({
+#             "payment_type":          "pay_as_you_go",
+#             "fee":                   payg_fee,
+#             "label":                 "Pay-as-you-go",
+#             "subscription_interval": None,
+#             "access_period_days":    access_days,
+#         })
+
+#     # Fallback
+#     if not options:
+#         options.append({
+#             "payment_type":          pt,
+#             "fee":                   one_time_fee,
+#             "label":                 {"one_time": "One-time"}.get(pt, pt),
+#             "subscription_interval": None,
+#             "access_period_days":    None,
+#         })
+
+#     return options
+
+# v2
 
 def _course_dict(course, user: Optional = None) -> dict:
     enrollment = None
@@ -706,25 +878,24 @@ def _course_dict(course, user: Optional = None) -> dict:
         "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
         "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
 
-        # ── Payment fields ────────────────────────────────────────────────────
-        # fee          = the generic / base price column (used for one_time)
-        # subscription_fee   = per-period fee for subscription billing
-        # pay_as_you_go_fee  = per-window fee for PAYG billing
-        # instructor_led_fee = optional uplift when student opts into live sessions
-        # access_period_days = number of days unlocked by one PAYG payment
-        #
-        # available_payment_types is pre-built so the frontend pill-switcher
-        # can render correctly without extra API calls.
-        "fee":                       float(course.fee or 0),
-        "payment_type":              course.payment_type,
-        "subscription_interval":     course.subscription_interval,
-        "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
-        "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
-        "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
-        "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
-        "available_payment_types":   _build_payment_types(course),
-        # ─────────────────────────────────────────────────────────────────────
+        # ── All fee columns returned so the frontend can render any option ──
+        # "fee":                       float(course.fee or 0),
+        # "payment_type":              course.payment_type,
+        # "subscription_interval":     course.subscription_interval,
+        # "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
+        # "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
+        # "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
+        # "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
 
+        # ── Pre-built option list — consumed by PaymentTypeSelector ─────────
+        # Contains one entry per non-zero fee field, each with the correct
+        # fee for that billing model (not always course.fee).
+        # "available_payment_types":   _build_payment_types(course),
+        # ────────────────────────────────────────────────────────────────────
+
+        # 
+        **_pricing_fields(course),
+        
         "subscription_installments": course.subscription_installments,
         "lang":                      course.lang,
         "duration_weeks":            course.duration_weeks,
@@ -754,7 +925,6 @@ def _course_dict(course, user: Optional = None) -> dict:
         "rejection_reason":          course.rejection_reason,
     }
 
-# +++++++++++++++++++
 
 # ─────────────────────────────────────────────
 #  Secure content serving
@@ -1636,6 +1806,7 @@ async def get_course(
         for a in course.tutor_assignments
         if a.tutor
     ]
+    
 
     return d
 
@@ -1677,6 +1848,54 @@ async def create_course(
     return _course_dict(course, user)
 
 
+# @router.put("/{course_id}")
+# async def update_course(
+#     course_id: int,
+#     payload: CourseUpdate,
+#     user: User = Depends(get_current_verified_user),
+#     db: Session = Depends(get_db),
+# ):
+#     course = db.query(Course).filter(Course.id == course_id).first()
+#     if not course:
+#         raise HTTPException(status_code=404, detail="Course not found")
+#     if not user.is_admin() and course.creator_id != user.id:
+#         raise HTTPException(status_code=403, detail="Not your course")
+
+#     # Apply all scalar fields — exclude relationship fields and status (handled below)
+#     updatable = payload.model_dump(
+#         exclude_none=True,
+#         exclude={"category_ids", "tag_ids", "status"},
+#     )
+#     for field, val in updatable.items():
+#         setattr(course, field, val)
+
+#     if payload.title:
+#         course.slug = _make_slug(payload.title, db, exclude_id=course_id)
+
+#     if payload.category_ids is not None:
+#         course.categories = db.query(Category).filter(Category.id.in_(payload.category_ids)).all()
+
+#     if payload.tag_ids is not None:
+#         course.tags = db.query(Tag).filter(Tag.id.in_(payload.tag_ids)).all()
+
+#     # Status transitions:
+#     # - Admins can set any status freely.
+#     # - Creators can only move to 'pending' (submit for review).
+#     # - Post-approval pricing/detail updates are allowed without changing status;
+#     #   the old code unconditionally reset status to 'pending' which blocked
+#     #   approved courses from being updated in-place.
+#     if payload.status is not None:
+#         if user.is_admin():
+#             course.status = payload.status
+#         elif payload.status == CourseStatus.pending:
+#             course.status = CourseStatus.pending
+#         # Any other status change by a non-admin is silently ignored
+
+#     db.commit()
+#     db.refresh(course)
+#     return _course_dict(course, user)
+
+# v2
 @router.put("/{course_id}")
 async def update_course(
     course_id: int,
@@ -1685,43 +1904,90 @@ async def update_course(
     db: Session = Depends(get_db),
 ):
     course = db.query(Course).filter(Course.id == course_id).first()
+
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
+
     if not user.is_admin() and course.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your course")
 
-    # Apply all scalar fields — exclude relationship fields and status (handled below)
-    updatable = payload.model_dump(
+    # ─────────────────────────────────────────────
+    # 1. Extract payload safely
+    # ─────────────────────────────────────────────
+    update_data = payload.model_dump(
         exclude_none=True,
         exclude={"category_ids", "tag_ids", "status"},
     )
-    for field, val in updatable.items():
+
+    # ─────────────────────────────────────────────
+    # 2. Apply scalar fields
+    # ─────────────────────────────────────────────
+    for field, val in update_data.items():
         setattr(course, field, val)
 
-    if payload.title:
+    # ─────────────────────────────────────────────
+    # 3. Title → slug sync
+    # ─────────────────────────────────────────────
+    if "title" in update_data:
         course.slug = _make_slug(payload.title, db, exclude_id=course_id)
 
+    # ─────────────────────────────────────────────
+    # 4. Relationships
+    # ─────────────────────────────────────────────
     if payload.category_ids is not None:
-        course.categories = db.query(Category).filter(Category.id.in_(payload.category_ids)).all()
+        course.categories = (
+            db.query(Category)
+            .filter(Category.id.in_(payload.category_ids))
+            .all()
+        )
 
     if payload.tag_ids is not None:
-        course.tags = db.query(Tag).filter(Tag.id.in_(payload.tag_ids)).all()
+        course.tags = (
+            db.query(Tag)
+            .filter(Tag.id.in_(payload.tag_ids))
+            .all()
+        )
 
-    # Status transitions:
-    # - Admins can set any status freely.
-    # - Creators can only move to 'pending' (submit for review).
-    # - Post-approval pricing/detail updates are allowed without changing status;
-    #   the old code unconditionally reset status to 'pending' which blocked
-    #   approved courses from being updated in-place.
+    # ─────────────────────────────────────────────
+    # 5. Status rules
+    # ─────────────────────────────────────────────
     if payload.status is not None:
         if user.is_admin():
             course.status = payload.status
         elif payload.status == CourseStatus.pending:
             course.status = CourseStatus.pending
-        # Any other status change by a non-admin is silently ignored
+        # non-admin invalid transitions ignored intentionally
 
+    # ─────────────────────────────────────────────
+    # 6. AUTO-DERIVE FLAGS (IMPORTANT FIX)
+    # ─────────────────────────────────────────────
+
+    if "subscription_fee" in update_data and "subscription_enabled" not in update_data:
+        course.subscription_enabled = (
+            course.subscription_fee is not None
+            and float(course.subscription_fee) > 0
+        )
+
+    if "pay_as_you_go_fee" in update_data and "pay_as_you_go_enabled" not in update_data:
+        course.pay_as_you_go_enabled = (
+            course.pay_as_you_go_fee is not None
+            and float(course.pay_as_you_go_fee) > 0
+        )
+
+    if "installment_fee" in update_data and "installment_enabled" not in update_data:
+        course.installment_enabled = (
+            course.installment_fee is not None
+            and float(course.installment_fee) > 0
+            and course.installment_count is not None
+            and int(course.installment_count) > 1
+        )
+
+    # ─────────────────────────────────────────────
+    # 7. Commit
+    # ─────────────────────────────────────────────
     db.commit()
     db.refresh(course)
+
     return _course_dict(course, user)
 
 
