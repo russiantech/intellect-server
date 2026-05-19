@@ -1,7 +1,9 @@
 cd ~/intellect-api.salesnet.ng
 
 # 1. See what's actually on port 8001 (likely an old process)
-ss -tlnp | grep 8001
+# ss -tlnp | grep 8001
+bash control.sh status
+
 ps aux | grep -E "gunicorn|uvicorn"
 
 # 2. Nuke everything — old gunicorn master, old uvicorn, anything lingering
