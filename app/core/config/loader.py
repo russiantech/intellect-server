@@ -3,7 +3,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from .models import (
@@ -111,23 +111,75 @@ class ConfigLoader:
 
     #     return enabled
 
-    # v2
+    # # v2
+    # def _load_oauth_providers(self) -> Dict[str, OAuthProviderConfig]:
+    #     enabled: Dict[str, OAuthProviderConfig] = {}
+
+    #     providers = [
+    #         ("google", "APP_GOOGLE_CLIENT_ID", "APP_GOOGLE_CLIENT_SECRET", "APP_GOOGLE_REDIRECT_URI"),
+    #         ("github", "APP_GITHUB_CLIENT_ID", "APP_GITHUB_CLIENT_SECRET", "APP_GITHUB_REDIRECT_URI"),
+    #         ("facebook", "APP_FACEBOOK_CLIENT_ID", "APP_FACEBOOK_CLIENT_SECRET", "APP_FACEBOOK_REDIRECT_URI"),
+    #         ("linkedin", "APP_LINKEDIN_CLIENT_ID", "APP_LINKEDIN_CLIENT_SECRET", "APP_LINKEDIN_REDIRECT_URI"),
+    #     ]
+
+    #     for name, id_key, secret_key, redirect_key in providers:
+    #         client_id = self._get(id_key)
+    #         client_secret = self._get(secret_key)
+
+    #         if not client_id or not client_secret:
+    #             logger.debug(f"OAuth provider '{name}' disabled — missing {id_key} or {secret_key}")
+    #             continue
+
+    #         meta = OAUTH_REGISTRY[name]
+    #         enabled[name] = OAuthProviderConfig(
+    #             client_id=client_id,
+    #             client_secret=client_secret,
+    #             authorize_url=meta["authorize_url"],
+    #             token_url=meta["token_url"],
+    #             userinfo_url=meta["userinfo_url"],
+    #             scopes=meta.get("scopes", []),
+    #             emails_url=meta.get("emails_url"),
+    #             redirect_uri=self._get(redirect_key),   # ← NEW: None if not set
+    #         )
+    #         logger.info(f"OAuth provider ready: {name}")
+
+    #     return enabled
+
+    # v3
+    # app/core/config/loader.py
+
+    def _is_dummy_value(self, value: Optional[str]) -> bool:
+        """Detect placeholder / dummy OAuth credentials."""
+        if not value or len(value.strip()) < 8:
+            return True
+        lowered = value.strip().lower()
+        markers = (
+            "dummy", "test", "placeholder", "your_", "changeme",
+            "xxx", "todo", "pending", "replace", "sample",
+            "example", "fake", "mock", "null", "none",
+        )
+        return any(m in lowered for m in markers)
+
     def _load_oauth_providers(self) -> Dict[str, OAuthProviderConfig]:
         enabled: Dict[str, OAuthProviderConfig] = {}
 
         providers = [
-            ("google", "APP_GOOGLE_CLIENT_ID", "APP_GOOGLE_CLIENT_SECRET", "APP_GOOGLE_REDIRECT_URI"),
-            ("github", "APP_GITHUB_CLIENT_ID", "APP_GITHUB_CLIENT_SECRET", "APP_GITHUB_REDIRECT_URI"),
-            ("facebook", "APP_FACEBOOK_CLIENT_ID", "APP_FACEBOOK_CLIENT_SECRET", "APP_FACEBOOK_REDIRECT_URI"),
-            ("linkedin", "APP_LINKEDIN_CLIENT_ID", "APP_LINKEDIN_CLIENT_SECRET", "APP_LINKEDIN_REDIRECT_URI"),
+            ("google",    "APP_GOOGLE_CLIENT_ID",    "APP_GOOGLE_CLIENT_SECRET",    "APP_GOOGLE_REDIRECT_URI"),
+            ("github",    "APP_GITHUB_CLIENT_ID",    "APP_GITHUB_CLIENT_SECRET",    "APP_GITHUB_REDIRECT_URI"),
+            ("facebook",  "APP_FACEBOOK_CLIENT_ID",  "APP_FACEBOOK_CLIENT_SECRET",  "APP_FACEBOOK_REDIRECT_URI"),
+            ("linkedin",  "APP_LINKEDIN_CLIENT_ID",  "APP_LINKEDIN_CLIENT_SECRET",  "APP_LINKEDIN_REDIRECT_URI"),
         ]
 
         for name, id_key, secret_key, redirect_key in providers:
-            client_id = self._get(id_key)
+            client_id     = self._get(id_key)
             client_secret = self._get(secret_key)
 
             if not client_id or not client_secret:
                 logger.debug(f"OAuth provider '{name}' disabled — missing {id_key} or {secret_key}")
+                continue
+
+            if self._is_dummy_value(client_id) or self._is_dummy_value(client_secret):
+                logger.warning(f"OAuth provider '{name}' disabled — dummy credentials detected")
                 continue
 
             meta = OAUTH_REGISTRY[name]
@@ -139,11 +191,12 @@ class ConfigLoader:
                 userinfo_url=meta["userinfo_url"],
                 scopes=meta.get("scopes", []),
                 emails_url=meta.get("emails_url"),
-                redirect_uri=self._get(redirect_key),   # ← NEW: None if not set
+                redirect_uri=self._get(redirect_key),
             )
             logger.info(f"OAuth provider ready: {name}")
 
         return enabled
+
 
     def load_config(self) -> AppConfig:
         secret = self._get("APP_AUTH_JWT_SECRET_KEY")
