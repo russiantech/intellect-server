@@ -110,3 +110,5 @@ alembic/versions/__pycache__/
 # poetry.lock
 # Pipfile.lock
 clean-env.ps1
+
+deploy_0/
