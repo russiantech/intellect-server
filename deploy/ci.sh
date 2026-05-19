@@ -71,8 +71,8 @@ regenerate_configs() {
     fi
 }
 
-graceful_restart() {
-    section "Graceful restart"
+full_restart() {
+    section "Full restart (picks up code changes)"
     bash "${DEPLOY_DIR}/control.sh" restart
 }
 
@@ -88,7 +88,7 @@ main() {
     run_tests
     run_migrations
     regenerate_configs
-    graceful_restart
+    full_restart
 
     hr
     log "CI/CD complete — ${DOMAIN}"

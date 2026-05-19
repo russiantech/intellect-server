@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # deploy/deploy.sh — One-time setup.
 # Run once per project or re-run after config changes.
-# Usage: bash deploy/deploy.sh
+# Usage: bash deploy/deploy.sh [--skip-preflight]
 set -euo pipefail
 
 source "$(dirname "$0")/_lib.sh"
+
+SKIP_PREFLIGHT=false
+[[ "${1:-}" == "--skip-preflight" ]] && SKIP_PREFLIGHT=true
 
 # ─────────────────────────────────────────────────────────────────
 # Preflight
@@ -188,7 +191,7 @@ main() {
     echo -e "  ${C}${DOMAIN} : port ${PORT}${N}"
     hr
 
-    preflight
+    $SKIP_PREFLIGHT || preflight
     install_packages
     create_dirs
     write_supervisord_conf
@@ -204,6 +207,7 @@ main() {
     echo ""
     info "Manage:  bash deploy/control.sh <start|stop|restart|status|logs|health>"
     info "Release: bash deploy/release.sh"
+    info "CI/CD:   bash deploy/ci.sh"
     echo ""
 }
 
