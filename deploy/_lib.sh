@@ -2,10 +2,12 @@
 # deploy/_lib.sh — Shared helpers. Source this; never run it directly.
 # Usage: source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 
+# v1
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && echo "Source this file, don't execute it." && exit 1
 
 DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_ROOT="$(dirname "$DEPLOY_DIR")"
+# APP_ROOT="$(dirname "$DEPLOY_DIR")"
+APP_ROOT="$(cd "$DEPLOY_DIR/.." && pwd)"
 
 source "${DEPLOY_DIR}/config.env"
 
