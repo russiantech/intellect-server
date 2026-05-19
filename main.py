@@ -113,8 +113,10 @@ app = FastAPI(
     description=app_config.general_config.site_description,
     version=app_config.general_config.api_version,
     lifespan=lifespan,
-    docs_url="/docs" if app_config.general_config.development_mode else None,
-    redoc_url="/redoc" if app_config.general_config.development_mode else None,
+    # docs_url="/docs" if app_config.general_config.development_mode else None,
+    # redoc_url="/redoc" if app_config.general_config.development_mode else None,
+    docs_url="/docs",
+    redoc_url="/redoc",
 )
 
 # ── Static file serving ──────────────────────────────────────────────────────
