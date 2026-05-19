@@ -139,13 +139,30 @@ cmd_shell() {
     exec bash --rcfile <(echo "source ${VENV_PATH}/bin/activate; PS1='(${APP_NAME}) \u@\h:\w\$ '")
 }
 
+# cmd_workers() {
+#     section "Gunicorn workers"
+#     ps -o pid,ppid,rss,vsz,pcpu,pmem,stat,args \
+#         --pid "$(pgrep -d',' -f "gunicorn.*${APP_NAME}" 2>/dev/null || echo 0)" \
+#         2>/dev/null \
+#         | awk 'NR==1{print} NR>1{$7=""; printf "  %-8s %-8s %5s MB  %5s%%  %s\n", $1,$2,$3/1024,$6,$8}' \
+#         || warn "No workers found"
+# }
+
+# 2
 cmd_workers() {
     section "Gunicorn workers"
-    ps -o pid,ppid,rss,vsz,pcpu,pmem,stat,args \
-        --pid "$(pgrep -d',' -f "gunicorn.*${APP_NAME}" 2>/dev/null || echo 0)" \
-        2>/dev/null \
-        | awk 'NR==1{print} NR>1{$7=""; printf "  %-8s %-8s %5s MB  %5s%%  %s\n", $1,$2,$3/1024,$6,$8}' \
-        || warn "No workers found"
+
+    ps -eo pid,ppid,rss,pcpu,stat,args \
+        | grep -E "gunicorn|uvicorn" \
+        | grep -v grep \
+        | awk '{
+            printf "  PID %-7s PPID %-7s RSS %-8s KB CPU %-5s%% %s\n",
+            $1, $2, $3, $4, substr($0, index($0,$6))
+        }'
+
+    if ! ps -eo args | grep -q "gunicorn\|uvicorn"; then
+        warn "No workers found"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────
