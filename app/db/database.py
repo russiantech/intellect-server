@@ -40,8 +40,15 @@ def get_engine():
         echo=config.database_config.echo,
         pool_pre_ping=True,  # Drop and replace stale connections before use
         future=True,          # SQLAlchemy 2.x query style
+        echo_pool=False,
+        connect_args={
+            "connect_timeout": 5,  # TCP connect timeout (psycopg2)
+            },
+        
     )
 
+    # v2
+    
     @event.listens_for(_engine, "connect")
     def set_timezone(dbapi_conn, connection_record):
         cursor = dbapi_conn.cursor()

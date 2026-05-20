@@ -428,6 +428,161 @@ async def get_lesson_assessments(
 
 # ── PUBLIC BROWSE ─────────────────────────────────────────────────────────────
 
+# @router.get("/")
+# async def list_courses(
+#     page: int = Query(1, ge=1),
+#     per_page: int = Query(20, ge=1, le=100),
+#     search: Optional[str] = None,
+#     category: Optional[str] = None,
+#     level: Optional[str] = None,
+#     payment_type: Optional[str] = None,
+#     featured: Optional[bool] = None,
+#     status: Optional[str] = "published",
+#     creator_id: Optional[int] = None,
+#     sort: Optional[str] = "newest",
+#     db: Session = Depends(get_db),
+#     current_user: Optional[User] = Depends(optional_user),
+# ):
+#     """
+#     Public course listing with filtering, pagination, and sorting.
+
+#     Cache strategy:
+#       - Anonymous requests are cached for 5 minutes, keyed on all query params.
+#         All filter combinations are independently cached — a search for "python"
+#         is a different key from no search.
+#       - Authenticated requests are never cached because _course_dict includes
+#         per-user is_enrolled and progress_pct, which differ between users.
+#       - Invalidated by: course publish, update, approve, delete, create.
+#     """
+#     # ── Cache check (anonymous only) ──────────────────────────────
+#     cache_key: Optional[str] = None
+#     if current_user is None:
+#         cache_key = cache.make_key(
+#             "courses:list",
+#             page, per_page, search, category, level,
+#             payment_type, featured, status, creator_id, sort,
+#         )
+#         hit = cache.get(cache_key)
+#         if hit is not None:
+#             return hit
+
+#     # ── Build filtered query ──────────────────────────────────────
+#     def _apply_filters(q):
+#         if status:
+#             q = q.filter(Course.status == status)
+#         if search:
+#             q = q.filter(or_(
+#                 Course.title.ilike(f"%{search}%"),
+#                 Course.description.ilike(f"%{search}%"),
+#             ))
+#         if category:
+#             raw = [s.strip() for s in category.split(",") if s.strip()]
+#             if raw:
+#                 try:
+#                     cat_ids = [int(c) for c in raw]
+#                     cat_sq = (
+#                         db.query(Course.id)
+#                         .join(Course.categories)
+#                         .filter(Category.id.in_(cat_ids))
+#                         .subquery()
+#                     )
+#                     q = q.filter(Course.id.in_(cat_sq))
+#                 except ValueError:
+#                     cat_sq = (
+#                         db.query(Course.id)
+#                         .join(Course.categories)
+#                         .filter(Category.slug.in_(raw))
+#                         .subquery()
+#                     )
+#                     q = q.filter(Course.id.in_(cat_sq))
+#         if level:
+#             raw_levels = [s.strip() for s in level.split(",") if s.strip()]
+#             if raw_levels:
+#                 q = q.filter(Course.level.in_(raw_levels))
+#         if payment_type:
+#             raw_types = [s.strip() for s in payment_type.split(",") if s.strip()]
+#             if raw_types:
+#                 q = q.filter(Course.payment_type.in_(raw_types))
+#         if featured is not None:
+#             q = q.filter(Course.featured == featured)
+#         if creator_id:
+#             q = q.filter(Course.creator_id == creator_id)
+#         return q
+
+#     # ── Count ─────────────────────────────────────────────────────
+#     count_q = _apply_filters(db.query(Course.id))
+#     if sort == "rating":
+#         count_q = count_q.outerjoin(Course.feedbacks).group_by(Course.id)
+#     total = count_q.count()
+
+#     if total == 0:
+#         empty = {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
+#         if cache_key:
+#             cache.set(cache_key, empty, ttl=300)
+#         return empty
+
+#     # ── Paginate ──────────────────────────────────────────────────
+#     if sort == "popular":
+#         page_q = _apply_filters(
+#             db.query(Course.id, Course.views)
+#         ).order_by(Course.views.desc(), Course.id)
+#     elif sort == "rating":
+#         avg_rating = func.coalesce(func.avg(Feedback.rating), 0).label("avg_rating")
+#         page_q = (
+#             _apply_filters(db.query(Course.id, avg_rating))
+#             .outerjoin(Course.feedbacks)
+#             .group_by(Course.id)
+#             .order_by(avg_rating.desc(), Course.id)
+#         )
+#     else:
+#         page_q = _apply_filters(
+#             db.query(Course.id, Course.created_at)
+#         ).order_by(Course.created_at.desc(), Course.id)
+
+#     rows = page_q.offset((page - 1) * per_page).limit(per_page).all()
+#     matching_ids = [r[0] for r in rows]
+
+#     if not matching_ids:
+#         partial = {
+#             "items": [], "total": total, "page": page,
+#             "per_page": per_page,
+#             "pages": (total + per_page - 1) // per_page,
+#         }
+#         if cache_key:
+#             cache.set(cache_key, partial, ttl=300)
+#         return partial
+
+#     # ── Fetch full objects (all relations in one query) ───────────
+#     order_map = case({id_: idx for idx, id_ in enumerate(matching_ids)}, value=Course.id)
+#     courses = (
+#         db.query(Course)
+#         .options(
+#             subqueryload(Course.categories),
+#             subqueryload(Course.tags),
+#             joinedload(Course.creator),
+#             subqueryload(Course.enrollments),
+#             subqueryload(Course.feedbacks),
+#         )
+#         .filter(Course.id.in_(matching_ids))
+#         .order_by(order_map)
+#         .all()
+#     )
+
+#     response = {
+#         "items": [_course_dict(c, current_user) for c in courses],
+#         "total": total,
+#         "page": page,
+#         "per_page": per_page,
+#         "pages": (total + per_page - 1) // per_page,
+#     }
+
+#     # ── Store anonymous response in cache ─────────────────────────
+#     if cache_key:
+#         cache.set(cache_key, _to_cacheable(response), ttl=300)
+
+#     return response
+
+# v2
 @router.get("/")
 async def list_courses(
     page: int = Query(1, ge=1),
@@ -443,17 +598,6 @@ async def list_courses(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(optional_user),
 ):
-    """
-    Public course listing with filtering, pagination, and sorting.
-
-    Cache strategy:
-      - Anonymous requests are cached for 5 minutes, keyed on all query params.
-        All filter combinations are independently cached — a search for "python"
-        is a different key from no search.
-      - Authenticated requests are never cached because _course_dict includes
-        per-user is_enrolled and progress_pct, which differ between users.
-      - Invalidated by: course publish, update, approve, delete, create.
-    """
     # ── Cache check (anonymous only) ──────────────────────────────
     cache_key: Optional[str] = None
     if current_user is None:
@@ -480,19 +624,33 @@ async def list_courses(
             if raw:
                 try:
                     cat_ids = [int(c) for c in raw]
+                    
+                    # cat_sq = (
+                    #     db.query(Course.id)
+                    #     .join(Course.categories)
+                    #     .filter(Category.id.in_(cat_ids))
+                    #     .subquery()
+                    # )
+                    
+                    # SAWarning: Coercing Subquery object into a select() for use in IN(); please pass a select() construct explicitly q = q.filter(Course.id.in_(cat_sq))
+                    
+                    # v2
+                    # Option 2: Use scalar_subquery() (cleaner, 1.4+ compatible)
                     cat_sq = (
                         db.query(Course.id)
                         .join(Course.categories)
                         .filter(Category.id.in_(cat_ids))
-                        .subquery()
+                        .scalar_subquery()
                     )
+                    q = q.filter(Course.id.in_(cat_sq))
+
                     q = q.filter(Course.id.in_(cat_sq))
                 except ValueError:
                     cat_sq = (
                         db.query(Course.id)
                         .join(Course.categories)
-                        .filter(Category.slug.in_(raw))
-                        .subquery()
+                        .filter(Category.id.in_(cat_ids))
+                        .scalar_subquery()
                     )
                     q = q.filter(Course.id.in_(cat_sq))
         if level:
@@ -552,7 +710,7 @@ async def list_courses(
             cache.set(cache_key, partial, ttl=300)
         return partial
 
-    # ── Fetch full objects (all relations in one query) ───────────
+    # ── Fetch full objects with all relations in one query ─────────
     order_map = case({id_: idx for idx, id_ in enumerate(matching_ids)}, value=Course.id)
     courses = (
         db.query(Course)
@@ -560,6 +718,7 @@ async def list_courses(
             subqueryload(Course.categories),
             subqueryload(Course.tags),
             joinedload(Course.creator),
+            subqueryload(Course.lessons).subqueryload(Lesson.topics),  # Eager load lessons+topics
             subqueryload(Course.enrollments),
             subqueryload(Course.feedbacks),
         )
@@ -568,8 +727,57 @@ async def list_courses(
         .all()
     )
 
+    # ── BULK PRE-COMPUTE STATS (eliminates N+1 in _course_dict) ───
+    course_ids = matching_ids
+    
+    # Pre-compute user's enrollments for all courses in one dict
+    enrollment_map = {}
+    if current_user:
+        enrollment_map = {
+            e.course_id: e 
+            for e in db.query(Enrollment).filter(
+                Enrollment.user_id == current_user.id,
+                Enrollment.course_id.in_(course_ids),
+            ).all()
+        }
+    
+    # Pre-compute feedback stats (avg_rating, count) for all courses
+    feedback_stats = dict(
+        db.query(
+            Feedback.course_id,
+            func.avg(Feedback.rating).label("avg"),
+            func.count(Feedback.id).label("cnt")
+        )
+        .filter(Feedback.course_id.in_(course_ids))
+        .group_by(Feedback.course_id)
+        .all()
+    )
+    feedback_stats = {
+        cid: (round(avg, 1) if avg else None, cnt)
+        for cid, avg, cnt in feedback_stats
+    }
+    
+    # Pre-compute topic counts for all courses
+    topic_counts = dict(
+        db.query(Topic.course_id, func.count(Topic.id))
+        .join(Lesson, Topic.lesson_id == Lesson.id)
+        .filter(Lesson.course_id.in_(course_ids))
+        .group_by(Topic.course_id)
+        .all()
+    )
+
+    # ── Build response ────────────────────────────────────────────
     response = {
-        "items": [_course_dict(c, current_user) for c in courses],
+        "items": [
+            _course_dict(
+                c, 
+                current_user,
+                _enrollment_map=enrollment_map,
+                _feedback_stats=feedback_stats,
+                _topic_counts=topic_counts,
+            ) 
+            for c in courses
+        ],
         "total": total,
         "page": page,
         "per_page": per_page,

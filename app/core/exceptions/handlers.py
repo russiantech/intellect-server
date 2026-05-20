@@ -1,325 +1,710 @@
+# """
+# app/core/exceptions/handlers.py  v3
+# ====================================
+# Production-grade exception handling for Intellect LMS.
+
+# Design principles:
+# - Standalone functions (FastAPI native pattern)
+# - Structured logging with request IDs
+# - Client errors (4xx) → warning logs, server errors (5xx) → error logs
+# - Consistent error envelope: {success, message, error_id, timestamp, details?}
+# - Never re-raise after catching (prevents middleware double-send bugs)
+# """
+
+# import logging
+# import traceback
+# import uuid
+# from datetime import datetime, timezone
+# from typing import Any, Callable, Dict, Optional
+
 # from fastapi import Request
 # from fastapi.responses import JSONResponse
 # from fastapi.exceptions import RequestValidationError
 # from starlette.exceptions import HTTPException as StarletteHTTPException
-# from jose import JWTError
-# from sqlalchemy.exc import IntegrityError
-# from psycopg2.errors import CheckViolation, UniqueViolation, ForeignKeyViolation
-# import logging
-# from app.utils.responses import api_response
-# from app.core.exceptions.custom_exceptions import CustomAPIException
+# from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
+
+# from .custom_exceptions import CustomAPIException
 
 # logger = logging.getLogger(__name__)
 
-# class ExceptionHandler:
-#     def __init__(self, config):
-#         self.config = config
 
-#     async def custom_api_exception_handler(request, exc: CustomAPIException):
-#         logger.warning(
-#             f"Custom API exception at {request.url.path}: {exc.message}"
-#         )
-                
-#         return api_response(
-#             success=False,
-#             message=exc.message,
-#             errors={
-#                 "error_code": exc.error_code,
-#                 "details": exc.details
-#             },
-#             status_code=exc.status_code,
-#             path=str(request.url.path)
-#         )
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # ERROR ENVELOPE (consistent response shape)
+# # ═══════════════════════════════════════════════════════════════════════════════
 
-#     async def jwt_exception_handler(self, request: Request, exc: JWTError) -> JSONResponse:
-#         """Handle JWT token validation errors."""
-#         error_detail = "Invalid authentication token"
-#         if "expired" in str(exc).lower():
-#             error_detail = "Authentication token has expired"
-        
-#         logger.warning(f"JWT validation failed: {error_detail}")
-        
-#         return JSONResponse(
-#             status_code=401,
-#             content={
-#                 "detail": error_detail,
-#                 "error_code": "INVALID_TOKEN"
-#             }
-#         )
-
-#     async def http_exception_handler(self, request: Request, exc: StarletteHTTPException) -> JSONResponse:
-#         """Handle HTTP exceptions (404, 403, etc.)."""
-#         logger.warning(
-#             f"HTTPException {exc.status_code} at {request.url.path}: {exc.detail}"
-#         )
-                
-#         return api_response(
-#             success=False,
-#             message=str(exc.detail),
-#             errors={"status_code": exc.status_code},
-#             status_code=exc.status_code,
-#             path=str(request.url.path)
-#         )
+# def _error_response(
+#     status_code: int,
+#     message: str,
+#     *,
+#     error_code: Optional[str] = None,
+#     details: Optional[Dict[str, Any]] = None,
+#     error_id: Optional[str] = None,
+#     request_id: Optional[str] = None,
+# ) -> JSONResponse:
+#     """
+#     Build a consistent error response envelope.
     
-#     async def validation_exception_handler_0(
-#         self,
-#         request: Request,
-#         exc: RequestValidationError
-#     ) -> JSONResponse:
-#         """Handle validation errors and return clean, structured responses."""
+#     Shape:
+#         {
+#             "success": false,
+#             "message": "Human-readable description",
+#             "error_id": "uuid-for-support",
+#             "error_code": "MACHINE_READABLE_CODE",
+#             "timestamp": "2026-05-20T18:37:00+00:00",
+#             "request_id": "optional-trace-id",
+#             "details": {}  # optional, machine-readable extra context
+#         }
+#     """
+#     content: Dict[str, Any] = {
+#         "success": False,
+#         "message": message,
+#         "timestamp": datetime.now(timezone.utc).isoformat(),
+#     }
+    
+#     if error_id:
+#         content["error_id"] = error_id
+#     if error_code:
+#         content["error_code"] = error_code
+#     if request_id:
+#         content["request_id"] = request_id
+#     if details:
+#         content["details"] = details
         
-#         logger.warning(
-#             f"Validation error at {request.url.path}: {exc.errors()}"
-#         )
+#     return JSONResponse(status_code=status_code, content=content)
 
-#         formatted_errors = []
 
-#         for err in exc.errors():
-#             field = err.get("loc", [])[-1]
-#             message = err.get("msg", "Invalid input")
+# def _generate_error_id() -> str:
+#     """Generate a short, URL-safe error ID for support tickets."""
+#     return f"err-{uuid.uuid4().hex[:12]}"
 
-#             formatted_errors.append({
-#                 "field": field,
-#                 "message": message
-#             })
 
-#         return api_response(
-#             success=False,
-#             # message="Validation error.",
-#             message=f"{formatted_errors[0].get('message')}",
-#             errors=formatted_errors,
-#             status_code=422,
-#             path=str(request.url.path)
-#         )
+# def _extract_request_id(request: Request) -> Optional[str]:
+#     """Extract request ID from headers if present (for distributed tracing)."""
+#     return request.headers.get("x-request-id") or request.headers.get("x-trace-id")
 
-#     async def validation_exception_handler(self, request: Request, exc: RequestValidationError) -> JSONResponse:
-#         """Handle Pydantic validation errors and return a friendly message."""
-#         logger.warning(f"Validation error at {request.url.path}: {exc.errors()}")
 
-#         # from app.utils.responses import api_response
+# def _log_client_error(
+#     exc: Exception,
+#     request: Request,
+#     error_id: str,
+#     status_code: int,
+# ) -> None:
+#     """
+#     Log client errors (4xx) as warnings — these are the client's fault.
+#     """
+#     logger.warning(
+#         "[%s] %s %s %s — %s (status=%d)",
+#         error_id,
+#         request.method,
+#         request.url.path,
+#         type(exc).__name__,
+#         str(exc)[:200],
+#         status_code,
+#         extra={
+#             "error_id": error_id,
+#             "request_id": _extract_request_id(request),
+#             "client_ip": request.client.host if request.client else None,
+#             "user_agent": request.headers.get("user-agent"),
+#         },
+#     )
 
-#         # Take the first error only for smoother UX
-#         first_error = exc.errors()[0]
 
-#         # Map field-specific friendly messages
-#         field = first_error.get("loc", ["field"])[-1]
-#         err_type = first_error.get("type", "")
-#         msg = first_error.get("msg", "Invalid input")
+# def _log_server_error(
+#     exc: Exception,
+#     request: Request,
+#     error_id: str,
+#     status_code: int,
+# ) -> None:
+#     """
+#     Log server errors (5xx) as errors with full traceback — these are our fault.
+#     """
+#     logger.error(
+#         "[%s] %s %s %s — %s (status=%d)\n[%s] Traceback:\n%s",
+#         error_id,
+#         request.method,
+#         request.url.path,
+#         type(exc).__name__,
+#         str(exc)[:200],
+#         status_code,
+#         error_id,
+#         traceback.format_exc(),
+#         extra={
+#             "error_id": error_id,
+#             "request_id": _extract_request_id(request),
+#             "client_ip": request.client.host if request.client else None,
+#             "user_agent": request.headers.get("user-agent"),
+#         },
+#     )
 
-#         if field == "username":
-#             msg = "Username must be 3–30 characters (letters, numbers, hyphens, underscores)."
-#         elif field == "email":
-#             msg = "Please enter a valid email address."
-#         elif field == "phone":
-#             msg = "Invalid phone number format. Use a valid local number, (e.g., 08012345678) or international format (e.g., +14155552671)."
-#         elif field == "name":
-#             msg = "Name must be 2–50 letters and spaces only."
-#         elif field == "password":
-#             msg = "Password must be at least 5 characters, with uppercase, lowercase, number, and special character."
 
-#         return api_response(
-#             success=False,
-#             message=msg,
-#             errors={
-#                 "status_code": 422,
-#                 "field": field,
-#                 "type": err_type,
-#             },
-#             status_code=422,
-#             path=str(request.url.path)
-#         )
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # HANDLER REGISTRY (clean, declarative mapping)
+# # ═══════════════════════════════════════════════════════════════════════════════
 
-#     async def integrity_error_handler(self, request: Request, exc: IntegrityError) -> JSONResponse:
-#         """Handle database integrity errors."""
-#         logger.error(f"Database integrity error at {request.url.path}: {str(exc)}", exc_info=True)
+# # Mapping: exception class → (handler function, default status code)
+# HANDLER_REGISTRY: Dict[type, tuple[Callable, int]] = {}
 
-#         # Default message
-#         message = "Database integrity constraint violated"
-#         error_detail = str(exc.orig) if hasattr(exc, "orig") else str(exc)
 
-#         # Specific constraint types
-#         if isinstance(exc.orig, UniqueViolation):
-#             message = "Duplicate value violates unique constraint"
-#         elif isinstance(exc.orig, CheckViolation):
-#             message = "Invalid data violates database check constraint"
-#         elif isinstance(exc.orig, ForeignKeyViolation):
-#             message = "Referenced record does not exist (foreign key constraint)"
+# def register_handler(exc_class: type, status_code: int = 500):
+#     """
+#     Decorator to register an exception handler.
+    
+#     Usage:
+#         @register_handler(CustomAPIException, 400)
+#         async def handle_custom_api_exception(request, exc):
+#             ...
+#     """
+#     def decorator(func: Callable) -> Callable:
+#         HANDLER_REGISTRY[exc_class] = (func, status_code)
+#         return func
+#     return decorator
 
-#         # from app.utils.responses import api_response
-        
-#         return api_response(
-#             success=False,
-#             message=message,
-#             errors={"detail": error_detail},
-#             status_code=400,
-#             path=str(request.url.path)
-#         )
 
-#     async def global_exception_handler(self, request: Request, exc: Exception) -> JSONResponse:
-#         logger.error(
-#             f"Unhandled exception at {request.url.path}: {str(exc)}",
-#             exc_info=True
-#         )
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # SPECIFIC HANDLERS
+# # ═══════════════════════════════════════════════════════════════════════════════
 
-#         # Handle validation-like errors safely
-#         errors = None
-#         if isinstance(exc, (RequestValidationError,)):
-#             errors = exc.errors()
+# @register_handler(CustomAPIException, 400)
+# async def handle_custom_api_exception(request: Request, exc: CustomAPIException) -> JSONResponse:
+#     """
+#     Domain-specific exceptions from our business logic.
+#     These are predictable, client-friendly errors.
+#     """
+#     error_id = _generate_error_id()
+#     _log_client_error(exc, request, error_id, exc.status_code)
+    
+#     return _error_response(
+#         status_code=exc.status_code,
+#         message=exc.message,
+#         error_code=exc.error_code,
+#         details=exc.details,
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
 
-#             json_errors = [
-#                 err for err in errors if err.get("type") == "json_invalid"
-#             ]
 
-#             if json_errors:
-#                 return api_response(
-#                     success=False,
-#                     message="Invalid JSON payload",
-#                     errors={
-#                         "hint": "Check quotes, commas, and JSON structure",
-#                         "details": json_errors,
-#                     },
-#                     status_code=422,
-#                     path=str(request.url.path),
-#                 )
+# @register_handler(RequestValidationError, 422)
+# async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+#     """
+#     Pydantic / FastAPI validation errors.
+#     Return the first error for UX simplicity, but include all in details.
+#     """
+#     error_id = _generate_error_id()
+#     _log_client_error(exc, request, error_id, 422)
+    
+#     errors = exc.errors()
+#     first_error = errors[0] if errors else {}
+#     field = first_error.get("loc", ["unknown"])[-1]
+    
+#     # Friendly field-specific messages
+#     friendly_messages = {
+#         "username": "Username must be 3–30 characters (letters, numbers, hyphens, underscores).",
+#         "email": "Please enter a valid email address.",
+#         "phone": "Invalid phone number. Use local (08012345678) or international (+14155552671) format.",
+#         "name": "Name must be 2–50 letters and spaces only.",
+#         "password": "Password must be at least 5 characters with uppercase, lowercase, number, and special character.",
+#     }
+    
+#     message = friendly_messages.get(field, first_error.get("msg", "Invalid input"))
+    
+#     return _error_response(
+#         status_code=422,
+#         message=message,
+#         error_code="VALIDATION_ERROR",
+#         details={
+#             "field": field,
+#             "errors": errors,  # Full list for debugging
+#         },
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
 
-#         # Environment-based detail exposure
-#         if self.config.general_config.development_mode:
-#             error_detail = str(exc)
-#         else:
-#             error_detail = "Internal server error"
 
-#         return api_response(
-#             success=False,
-#             message="An unexpected error occurred",
-#             errors={"detail": error_detail},
-#             status_code=500,
-#             path=str(request.url.path),
-#         )
+# @register_handler(StarletteHTTPException, 500)
+# async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+#     """
+#     Starlette HTTP exceptions (404, 405, 429, etc.).
+#     """
+#     error_id = _generate_error_id()
+    
+#     # 4xx = client error, 5xx = server error
+#     if exc.status_code >= 500:
+#         _log_server_error(exc, request, error_id, exc.status_code)
+#     else:
+#         _log_client_error(exc, request, error_id, exc.status_code)
+    
+#     return _error_response(
+#         status_code=exc.status_code,
+#         message=str(exc.detail),
+#         error_code=f"HTTP_{exc.status_code}",
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# @register_handler(IntegrityError, 409)
+# async def handle_integrity_error(request: Request, exc: IntegrityError) -> JSONResponse:
+#     """
+#     Database integrity errors: duplicates, FK violations, check violations.
+#     """
+#     error_id = _generate_error_id()
+#     _log_server_error(exc, request, error_id, 409)
+    
+#     # Extract specific violation type
+#     orig = getattr(exc, "orig", None)
+#     violation_type = type(orig).__name__ if orig else "UNKNOWN"
+    
+#     # User-friendly messages
+#     messages = {
+#         "UniqueViolation": "A record with this value already exists.",
+#         "ForeignKeyViolation": "Referenced record does not exist.",
+#         "CheckViolation": "Invalid data violates a constraint.",
+#         "NotNullViolation": "Required field cannot be empty.",
+#     }
+#     message = messages.get(violation_type, "Database constraint violated.")
+    
+#     return _error_response(
+#         status_code=409,
+#         message=message,
+#         error_code="INTEGRITY_ERROR",
+#         details={
+#             "violation_type": violation_type,
+#             "db_message": str(orig)[:500] if orig else None,
+#         },
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# @register_handler(ProgrammingError, 500)
+# async def handle_programming_error(request: Request, exc: ProgrammingError) -> JSONResponse:
+#     """
+#     Database schema errors: missing tables, columns, bad migrations.
+#     """
+#     error_id = _generate_error_id()
+#     _log_server_error(exc, request, error_id, 500)
+    
+#     orig = getattr(exc, "orig", None)
+    
+#     return _error_response(
+#         status_code=500,
+#         message="Database schema error. The application may not be fully migrated.",
+#         error_code="SCHEMA_ERROR",
+#         details={
+#             "db_message": str(orig)[:500] if orig else None,
+#             "hint": "Run 'alembic upgrade head' or check migration status.",
+#         },
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# @register_handler(SQLAlchemyError, 500)
+# async def handle_sqlalchemy_error(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+#     """
+#     Catch-all SQLAlchemy: connection pool exhaustion, timeouts, etc.
+#     """
+#     error_id = _generate_error_id()
+#     _log_server_error(exc, request, error_id, 500)
+    
+#     return _error_response(
+#         status_code=500,
+#         message="A database error occurred. Please try again shortly.",
+#         error_code="DATABASE_ERROR",
+#         details={"db_message": str(exc)[:500]},
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# @register_handler(ValueError, 400)
+# async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+#     """
+#     Common Python ValueError — usually a client input issue.
+#     """
+#     error_id = _generate_error_id()
+#     _log_client_error(exc, request, error_id, 400)
+    
+#     return _error_response(
+#         status_code=400,
+#         message=str(exc) or "Invalid value provided.",
+#         error_code="INVALID_VALUE",
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# @register_handler(KeyError, 400)
+# async def handle_key_error(request: Request, exc: KeyError) -> JSONResponse:
+#     """
+#     Missing key in dict — usually a malformed request.
+#     """
+#     error_id = _generate_error_id()
+#     _log_client_error(exc, request, error_id, 400)
+    
+#     return _error_response(
+#         status_code=400,
+#         message=f"Missing required field: {exc}",
+#         error_code="MISSING_FIELD",
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# @register_handler(AttributeError, 500)
+# async def handle_attribute_error(request: Request, exc: AttributeError) -> JSONResponse:
+#     """
+#     AttributeError — usually a code bug (None where object expected).
+#     """
+#     error_id = _generate_error_id()
+#     _log_server_error(exc, request, error_id, 500)
+    
+#     return _error_response(
+#         status_code=500,
+#         message="An unexpected error occurred. Please try again.",
+#         error_code="INTERNAL_ERROR",
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # GLOBAL CATCH-ALL (last resort)
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+#     """
+#     Last-resort handler for any exception not caught above.
+#     CRITICAL: Must not re-raise. The ASGI server may have already
+#     started sending response bytes; re-raising causes cascading
+#     RuntimeError: Response content shorter than Content-Length.
+#     """
+#     error_id = _generate_error_id()
+#     _log_server_error(exc, request, error_id, 500)
+    
+#     return _error_response(
+#         status_code=500,
+#         message="An unexpected error occurred. Please try again or contact support.",
+#         error_code="INTERNAL_ERROR",
+#         error_id=error_id,
+#         request_id=_extract_request_id(request),
+#     )
+
+
+# # ═══════════════════════════════════════════════════════════════════════════════
+# # REGISTRATION FUNCTION (called from main.py)
+# # ═══════════════════════════════════════════════════════════════════════════════
+
+# def register_all_exception_handlers(app) -> None:
+#     """
+#     Register all exception handlers on a FastAPI app.
+    
+#     Call this in main.py after creating the app but before including routers:
+    
+#         from app.core.exceptions.handlers import register_all_exception_handlers
+#         register_all_exception_handlers(app)
+#     """
+#     # Register specific handlers from registry
+#     for exc_class, (handler, _) in HANDLER_REGISTRY.items():
+#         app.add_exception_handler(exc_class, handler)
+    
+#     # Register catch-all last
+#     app.add_exception_handler(Exception, handle_unhandled_exception)
+    
+#     logger.info(
+#         "Registered %d exception handlers: %s",
+#         len(HANDLER_REGISTRY) + 1,
+#         [c.__name__ for c in list(HANDLER_REGISTRY.keys()) + [Exception]],
+#     )
+
 
 
 
 
 
 # v2
+"""
+app/core/exceptions/handlers.py  v3
+====================================
+Production-grade exception handling.
+
+Pattern: standalone async functions with @register_handler decorator.
+No classes, no manual app.add_exception_handler() scattered everywhere.
+"""
+
+import logging
+import traceback
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Optional, Type
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.exc import IntegrityError, ProgrammingError, SQLAlchemyError
-import logging
-import traceback
-import uuid
-from datetime import datetime, timezone
 
 from .custom_exceptions import CustomAPIException
 
 logger = logging.getLogger(__name__)
 
 
-class ExceptionHandler:
-    def __init__(self, config):
-        self.config = config
+# ═══════════════════════════════════════════════════════════════════════════════
+# REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    def _log_error(self, exc: Exception, request: Request, error_id: str):
-        logger.error(
-            f"[{error_id}] {type(exc).__name__} on {request.method} {request.url.path}\n"
-            f"[{error_id}] {exc}\n"
-            f"[{error_id}] Traceback:\n{traceback.format_exc()}"
-        )
+# Mapping: exception class → handler function
+HANDLER_REGISTRY: Dict[Type[Exception], Callable] = {}
 
-    def _error_response(
-        self,
-        status_code: int,
-        message: str,
-        *,
-        error_code: str | None = None,
-        details: dict | None = None,
-        error_id: str | None = None,
-    ):
-        content = {
-            "success": False,
-            "message": message,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        if error_code:
-            content["error_code"] = error_code
-        if details:
-            content["details"] = details
-        if error_id:
-            content["error_id"] = error_id
-        return JSONResponse(status_code=status_code, content=content)
 
-    # ── 1. Custom domain exceptions ──────────────────────────────────────────
-    async def custom_api_exception_handler(self, request: Request, exc: CustomAPIException):
-        return self._error_response(
-            status_code=exc.status_code,
-            message=exc.message,
-            error_code=exc.error_code,
-            details=exc.details,
-        )
+def register_handler(exc_class: Type[Exception]):
+    """Decorator to register an exception handler."""
+    def decorator(func: Callable) -> Callable:
+        HANDLER_REGISTRY[exc_class] = func
+        return func
+    return decorator
 
-    # ── 2. Pydantic / request validation ─────────────────────────────────────
-    async def validation_exception_handler(self, request: Request, exc: RequestValidationError):
-        return self._error_response(
-            status_code=422,
-            message="Request validation failed",
-            error_code="VALIDATION_ERROR",
-            details={"errors": exc.errors()},
-        )
 
-    # ── 3. Starlette HTTP exceptions (404, 405, etc.) ────────────────────────
-    async def http_exception_handler(self, request: Request, exc: StarletteHTTPException):
-        return self._error_response(
-            status_code=exc.status_code,
-            message=exc.detail,
-            error_code=f"HTTP_{exc.status_code}",
-        )
+# ═══════════════════════════════════════════════════════════════════════════════
+# RESPONSE BUILDER
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    # ── 4. IntegrityError (duplicates, FK violations) ────────────────────────
-    async def integrity_error_handler(self, request: Request, exc: IntegrityError):
-        error_id = str(uuid.uuid4())
-        self._log_error(exc, request, error_id)
-        detail = str(exc.orig) if hasattr(exc, "orig") and exc.orig else str(exc)
-        return self._error_response(
-            status_code=409,
-            message="Database integrity error. Possible duplicate or constraint violation.",
-            error_code="INTEGRITY_ERROR",
-            details={"db_message": detail},
-            error_id=error_id,
-        )
+def _error_response(
+    status_code: int,
+    message: str,
+    *,
+    error_code: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    error_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> JSONResponse:
+    """Consistent error envelope."""
+    content: Dict[str, Any] = {
+        "success": False,
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    if error_id:
+        content["error_id"] = error_id
+    if error_code:
+        content["error_code"] = error_code
+    if request_id:
+        content["request_id"] = request_id
+    if details:
+        content["details"] = details
+    return JSONResponse(status_code=status_code, content=content)
 
-    # ── 5. ProgrammingError (missing tables, columns, bad SQL) ───────────────
-    async def programming_error_handler(self, request: Request, exc: ProgrammingError):
-        error_id = str(uuid.uuid4())
-        self._log_error(exc, request, error_id)
-        detail = str(exc.orig) if hasattr(exc, "orig") and exc.orig else str(exc)
-        return self._error_response(
-            status_code=500,
-            message="Database schema error. The application may not be fully migrated.",
-            error_code="PROGRAMMING_ERROR",
-            details={"db_message": detail},
-            error_id=error_id,
-        )
 
-    # ── 6. Catch-all SQLAlchemy (connection pool, timeouts, etc.) ────────────
-    async def sqlalchemy_error_handler(self, request: Request, exc: SQLAlchemyError):
-        error_id = str(uuid.uuid4())
-        self._log_error(exc, request, error_id)
-        return self._error_response(
-            status_code=500,
-            message="A database error occurred.",
-            error_code="DATABASE_ERROR",
-            details={"db_message": str(exc)},
-            error_id=error_id,
-        )
+def _error_id() -> str:
+    return f"err-{uuid.uuid4().hex[:12]}"
 
-    # ── 7. Global last-resort handler ────────────────────────────────────────
-    async def global_exception_handler(self, request: Request, exc: Exception):
-        error_id = str(uuid.uuid4())
-        self._log_error(exc, request, error_id)
-        return self._error_response(
-            status_code=500,
-            message="An unexpected error occurred. Please try again or contact support.",
-            error_code="INTERNAL_ERROR",
-            error_id=error_id,
-        )
+
+def _request_id(request: Request) -> Optional[str]:
+    return request.headers.get("x-request-id") or request.headers.get("x-trace-id")
+
+
+def _log_warning(exc: Exception, request: Request, eid: str, status: int) -> None:
+    logger.warning(
+        "[%s] %s %s — %s (status=%d)",
+        eid, request.method, request.url.path, type(exc).__name__, status,
+        extra={
+            "error_id": eid,
+            "request_id": _request_id(request),
+            "client_ip": request.client.host if request.client else None,
+        },
+    )
+
+
+def _log_error(exc: Exception, request: Request, eid: str, status: int) -> None:
+    logger.error(
+        "[%s] %s %s — %s (status=%d)\n[%s] %s",
+        eid, request.method, request.url.path, type(exc).__name__, status,
+        eid, traceback.format_exc(),
+        extra={
+            "error_id": eid,
+            "request_id": _request_id(request),
+            "client_ip": request.client.host if request.client else None,
+        },
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HANDLERS — SPECIFIC
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@register_handler(CustomAPIException)
+async def handle_custom_api_exception(request: Request, exc: CustomAPIException) -> JSONResponse:
+    eid = _error_id()
+    _log_warning(exc, request, eid, exc.status_code)
+    return _error_response(
+        status_code=exc.status_code,
+        message=exc.message,
+        error_code=exc.error_code,
+        details=exc.details,
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(RequestValidationError)
+async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    eid = _error_id()
+    _log_warning(exc, request, eid, 422)
+    
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    field = first.get("loc", ["unknown"])[-1]
+    
+    friendly = {
+        "username": "Username must be 3–30 characters (letters, numbers, hyphens, underscores).",
+        "email": "Please enter a valid email address.",
+        "phone": "Invalid phone number. Use local (08012345678) or international (+14155552671) format.",
+        "name": "Name must be 2–50 letters and spaces only.",
+        "password": "Password must be at least 5 characters with uppercase, lowercase, number, and special character.",
+    }
+    
+    return _error_response(
+        status_code=422,
+        message=friendly.get(field, first.get("msg", "Invalid input")),
+        error_code="VALIDATION_ERROR",
+        details={"field": field, "errors": errors},
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(StarletteHTTPException)
+async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> JSONResponse:
+    eid = _error_id()
+    if exc.status_code >= 500:
+        _log_error(exc, request, eid, exc.status_code)
+    else:
+        _log_warning(exc, request, eid, exc.status_code)
+    
+    return _error_response(
+        status_code=exc.status_code,
+        message=str(exc.detail),
+        error_code=f"HTTP_{exc.status_code}",
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(IntegrityError)
+async def handle_integrity_error(request: Request, exc: IntegrityError) -> JSONResponse:
+    eid = _error_id()
+    _log_error(exc, request, eid, 409)
+    
+    orig = getattr(exc, "orig", None)
+    violation = type(orig).__name__ if orig else "UNKNOWN"
+    
+    messages = {
+        "UniqueViolation": "A record with this value already exists.",
+        "ForeignKeyViolation": "Referenced record does not exist.",
+        "CheckViolation": "Invalid data violates a constraint.",
+        "NotNullViolation": "Required field cannot be empty.",
+    }
+    
+    return _error_response(
+        status_code=409,
+        message=messages.get(violation, "Database constraint violated."),
+        error_code="INTEGRITY_ERROR",
+        details={"violation_type": violation, "db_message": str(orig)[:500] if orig else None},
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(ProgrammingError)
+async def handle_programming_error(request: Request, exc: ProgrammingError) -> JSONResponse:
+    eid = _error_id()
+    _log_error(exc, request, eid, 500)
+    
+    orig = getattr(exc, "orig", None)
+    return _error_response(
+        status_code=500,
+        message="Database schema error. The application may not be fully migrated.",
+        error_code="SCHEMA_ERROR",
+        details={"db_message": str(orig)[:500] if orig else None, "hint": "Run 'alembic upgrade head'"},
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(SQLAlchemyError)
+async def handle_sqlalchemy_error(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+    eid = _error_id()
+    _log_error(exc, request, eid, 500)
+    
+    return _error_response(
+        status_code=500,
+        message="A database error occurred. Please try again shortly.",
+        error_code="DATABASE_ERROR",
+        details={"db_message": str(exc)[:500]},
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(ValueError)
+async def handle_value_error(request: Request, exc: ValueError) -> JSONResponse:
+    eid = _error_id()
+    _log_warning(exc, request, eid, 400)
+    
+    return _error_response(
+        status_code=400,
+        message=str(exc) or "Invalid value provided.",
+        error_code="INVALID_VALUE",
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(KeyError)
+async def handle_key_error(request: Request, exc: KeyError) -> JSONResponse:
+    eid = _error_id()
+    _log_warning(exc, request, eid, 400)
+    
+    return _error_response(
+        status_code=400,
+        message=f"Missing required field: {exc}",
+        error_code="MISSING_FIELD",
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+@register_handler(AttributeError)
+async def handle_attribute_error(request: Request, exc: AttributeError) -> JSONResponse:
+    eid = _error_id()
+    _log_error(exc, request, eid, 500)
+    
+    return _error_response(
+        status_code=500,
+        message="An unexpected error occurred. Please try again.",
+        error_code="INTERNAL_ERROR",
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATCH-ALL (last resort — never re-raises)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    """
+    CRITICAL: Never re-raise. The ASGI server may have already started
+    sending response bytes; re-raising causes cascading RuntimeError.
+    """
+    eid = _error_id()
+    _log_error(exc, request, eid, 500)
+    
+    return _error_response(
+        status_code=500,
+        message="An unexpected error occurred. Please try again or contact support.",
+        error_code="INTERNAL_ERROR",
+        error_id=eid,
+        request_id=_request_id(request),
+    )
+

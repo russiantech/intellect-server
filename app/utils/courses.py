@@ -524,16 +524,113 @@ def _mini_user(user: User) -> dict:
         "title": user.title,
     }
 
-def _course_dict(course, user: Optional = None) -> dict:
-    enrollment = None
-    if user:
-        enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
+# def _course_dict(course, user: Optional = None) -> dict:
+#     enrollment = None
+#     if user:
+#         enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
 
-    avg_rating = None
-    if course.feedbacks:
-        avg_rating = round(
-            sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
-        )
+#     avg_rating = None
+#     if course.feedbacks:
+#         avg_rating = round(
+#             sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
+#         )
+
+#     return {
+#         "id":                        course.id,
+#         "title":                     course.title,
+#         "slug":                      course.slug,
+#         "description":               course.description,
+#         "short_description":         course.short_description,
+#         "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
+#         "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
+
+#         # ── All fee columns returned so the frontend can render any option ──
+#         # "fee":                       float(course.fee or 0),
+#         # "payment_type":              course.payment_type,
+#         # "subscription_interval":     course.subscription_interval,
+#         # "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
+#         # "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
+#         # "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
+#         # "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
+
+#         # ── Pre-built option list — consumed by PaymentTypeSelector ─────────
+#         # Contains one entry per non-zero fee field, each with the correct
+#         # fee for that billing model (not always course.fee).
+#         # "available_payment_types":   _build_payment_types(course),
+#         # ────────────────────────────────────────────────────────────────────
+
+#         # 
+#         **_pricing_fields(course),
+        
+#         "subscription_installments": course.subscription_installments,
+#         "lang":                      course.lang,
+#         "duration_weeks":            course.duration_weeks,
+#         "level":                     course.level,
+#         "status":                    course.status,
+#         "views":                     course.views,
+#         "featured":                  course.featured,
+#         "requirements":              course.requirements,
+#         "what_you_learn":            course.what_you_learn,
+#         "creator_pct":               course.creator_pct,
+#         "platform_pct":              course.platform_pct,
+#         "creator_id":                course.creator_id,
+#         "throttle_enabled":          course.throttle_enabled,
+#         "weekly_topic_limit":        course.weekly_topic_limit,
+#         "monthly_topic_limit":       course.monthly_topic_limit,
+#         "creator":                   _mini_user(course.creator) if course.creator else None,
+#         "categories":                [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
+#         "tags":                      [{"id": t.id, "name": t.name} for t in course.tags],
+#         "lessons_count":             len(course.lessons),
+#         "topics_count":              sum(len(l.topics) for l in course.lessons),
+#         "enrolled_count":            len(course.enrollments),
+#         "avg_rating":                avg_rating,
+#         "is_enrolled":               enrollment is not None,
+#         "progress_pct":              enrollment.progress_pct if enrollment else 0.0,
+#         "created_at":                course.created_at,
+#         "approved_at":               course.approved_at,
+#         "rejection_reason":          course.rejection_reason,
+#     }
+
+# v2
+from typing import Optional, Dict, Set
+from collections import defaultdict
+
+def _course_dict(
+    course, user: Optional = None, 
+    _enrollment_map: Optional[Dict[int, object]] = None,
+    _feedback_stats: Optional[Dict[int, tuple]] = None,
+    _topic_counts: Optional[Dict[int, int]] = None) -> dict:
+    """
+    Optimized course dict with optional pre-computed stats.
+    
+    Args:
+        _enrollment_map: dict mapping course_id -> enrollment for the current user
+        _feedback_stats: dict mapping course_id -> (avg_rating, count)
+        _topic_counts: dict mapping course_id -> total_topic_count
+    """
+    # Fast-path: use pre-computed enrollment instead of linear search
+    if _enrollment_map is not None:
+        enrollment = _enrollment_map.get(course.id)
+    elif user:
+        enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
+    else:
+        enrollment = None
+
+    # Fast-path: use pre-computed feedback stats
+    if _feedback_stats is not None:
+        avg_rating, _ = _feedback_stats.get(course.id, (None, 0))
+    else:
+        avg_rating = None
+        if course.feedbacks:
+            avg_rating = round(
+                sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
+            )
+
+    # Fast-path: use pre-computed topic count
+    if _topic_counts is not None:
+        topics_count = _topic_counts.get(course.id, 0)
+    else:
+        topics_count = sum(len(l.topics) for l in course.lessons)
 
     return {
         "id":                        course.id,
@@ -541,27 +638,9 @@ def _course_dict(course, user: Optional = None) -> dict:
         "slug":                      course.slug,
         "description":               course.description,
         "short_description":         course.short_description,
-        "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
+        "thumbnail":                 _absolute_url(course.thumbnail, "courses/thumbnails"),
         "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
-
-        # ── All fee columns returned so the frontend can render any option ──
-        # "fee":                       float(course.fee or 0),
-        # "payment_type":              course.payment_type,
-        # "subscription_interval":     course.subscription_interval,
-        # "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
-        # "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
-        # "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
-        # "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
-
-        # ── Pre-built option list — consumed by PaymentTypeSelector ─────────
-        # Contains one entry per non-zero fee field, each with the correct
-        # fee for that billing model (not always course.fee).
-        # "available_payment_types":   _build_payment_types(course),
-        # ────────────────────────────────────────────────────────────────────
-
-        # 
         **_pricing_fields(course),
-        
         "subscription_installments": course.subscription_installments,
         "lang":                      course.lang,
         "duration_weeks":            course.duration_weeks,
@@ -581,7 +660,7 @@ def _course_dict(course, user: Optional = None) -> dict:
         "categories":                [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
         "tags":                      [{"id": t.id, "name": t.name} for t in course.tags],
         "lessons_count":             len(course.lessons),
-        "topics_count":              sum(len(l.topics) for l in course.lessons),
+        "topics_count":              topics_count,
         "enrolled_count":            len(course.enrollments),
         "avg_rating":                avg_rating,
         "is_enrolled":               enrollment is not None,
