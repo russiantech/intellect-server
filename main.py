@@ -251,11 +251,12 @@ setup_exception_handlers(app, app_config)
 
 
 # ── Routers ───────────────────────────────────────────────────────────────────
-from app.api.root import root_router, health_router
+from app.api.root_router import root_router, health_router, debug_router
 app.include_router(root_router)       # GET /,  POST /deploy-webhook
 app.include_router(health_router)     # GET /health, /health/deep, /health/ready, /health/metrics
+app.include_router(debug_router)     # GET /debug, /debug/.., /debuug/..., /debug/metrics
 
-from app.api.router import v1_router
+from app.api.v1_router import v1_router
 app.include_router(v1_router)
 
 

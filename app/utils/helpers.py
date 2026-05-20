@@ -2,7 +2,9 @@ import secrets
 import string
 import json as _json
 from datetime import datetime, timezone
+from typing import Any
 from fastapi import Request
+from sqlalchemy import Enum
 from app.core.performance.cache_config import cache
 
 def generate_secure_code(length: int = 6) -> str:
@@ -31,17 +33,49 @@ def get_client_ip(request: Request) -> str:
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
-def _to_cacheable(data: dict) -> dict:
-    """
-    Convert a response dict to a JSON-safe form before storing in cache.
+# def _to_cacheable(data: dict) -> dict:
+#     """
+#     Convert a response dict to a JSON-safe form before storing in cache.
 
-    FastAPI serialises datetime/enum objects automatically when returning
-    from a route, but json.dumps (used by RedisService) does not.
-    Round-tripping through json with default=str converts all non-primitive
-    types to strings, making the dict safe for both the Redis and LRU backends.
+#     FastAPI serialises datetime/enum objects automatically when returning
+#     from a route, but json.dumps (used by RedisService) does not.
+#     Round-tripping through json with default=str converts all non-primitive
+#     types to strings, making the dict safe for both the Redis and LRU backends.
+#     """
+#     return _json.loads(_json.dumps(data, default=str))
+
+
+def _to_cacheable(data):
+    
+    """Fast-path for already-serializable objects."""
+    if isinstance(data, dict) and all(isinstance(v, (str, int, float, bool, list, dict, type(None))) for v in data.values()):
+        return data
+    
     """
+        Convert a response dict to a JSON-safe form before storing in cache.
+
+        FastAPI serialises datetime/enum objects automatically when returning
+        from a route, but json.dumps (used by RedisService) does not.
+        Round-tripping through json with default=str converts all non-primitive
+        types to strings, making the dict safe for both the Redis and LRU backends.
+        """
     return _json.loads(_json.dumps(data, default=str))
-
+    
+# In app/utils/helpers.py — ensure this is sync
+# def _to_cacheable(obj: Any) -> Any:
+#     """
+#     Convert SQLAlchemy models / datetimes / enums to plain JSON-serializable dicts.
+#     Must be fully synchronous — no await inside.
+#     """
+#     if isinstance(obj, datetime):
+#         return obj.isoformat()
+#     if isinstance(obj, Enum):
+#         return obj.value
+#     if isinstance(obj, list):
+#         return [_to_cacheable(i) for i in obj]
+#     if isinstance(obj, dict):
+#         return {k: _to_cacheable(v) for k, v in obj.items()}
+#     return obj
 
 def _invalidate_course_caches(course_id: int, slug: str = None) -> None:
     """

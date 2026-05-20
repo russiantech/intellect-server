@@ -23,7 +23,6 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 root_router = APIRouter(tags=["Root"], prefix="")
 health_router = APIRouter(tags=["Health"], prefix="/health")
 
-
 # ── Helpers ───────────────────────────────────────────────────────
 
 def verify_signature(body: bytes, signature: str) -> bool:
@@ -253,4 +252,118 @@ def health_metrics():
             "timestamp": datetime.utcnow().isoformat() + "Z",
         },
     )
+
+
+
+
+# DEBUG ROUTERS
+"""
+Debug endpoints for inspecting cache state.
+ONLY enable in production temporarily for diagnostics.
+"""
+import logging
+from typing import Any, Dict, List
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from app.core.performance.cache_config import cache
+from app.api.deps.auth import require_admin
+
+debug_router = APIRouter(prefix="/debug", tags=["Debug"])
+logger = logging.getLogger(__name__)
+
+
+class CacheInfo(BaseModel):
+    total_keys: int
+    keys: List[str]
+    sample_values: Dict[str, Any]
+
+
+@debug_router.get("/cache/keys", dependencies=[Depends(require_admin)])
+async def list_cache_keys():
+    """List all keys currently in the cache."""
+    # Access the underlying cache storage
+    # This depends on your cache backend implementation
+    
+    if hasattr(cache, '_cache'):  # LRU cache
+        keys = list(cache._cache.keys())
+        return {
+            "total_keys": len(keys),
+            "keys": keys[:100],  # Limit to first 100
+        }
+    elif hasattr(cache, 'redis'):  # Redis backend
+        # Use Redis KEYS command (careful in production!)
+        keys = cache.redis.keys('*')
+        decoded = [k.decode() if isinstance(k, bytes) else k for k in keys]
+        return {
+            "total_keys": len(decoded),
+            "keys": decoded[:100],
+        }
+    else:
+        return {"total_keys": 0, "keys": [], "note": "Unknown cache backend"}
+
+
+@debug_router.get("/cache/key/{key:path}", dependencies=[Depends(require_admin)])
+async def get_cache_value(key: str):
+    """Read the value of a specific cache key."""
+    value = cache.get(key)
+    if value is None:
+        raise HTTPException(404, f"Key not found: {key}")
+    
+    # Truncate large values for readability
+    import json
+    try:
+        serialized = json.dumps(value, default=str)
+        size = len(serialized)
+        preview = serialized[:2000] + "..." if size > 2000 else serialized
+        return {
+            "key": key,
+            "size_bytes": size,
+            "type": type(value).__name__,
+            "preview": preview,
+        }
+    except Exception as e:
+        return {
+            "key": key,
+            "type": type(value).__name__,
+            "error": f"Could not serialize: {e}",
+            "repr": repr(value)[:1000],
+        }
+
+
+@debug_router.post("/cache/clear", dependencies=[Depends(require_admin)])
+async def clear_cache():
+    """Clear all cache entries."""
+    if hasattr(cache, 'clear'):
+        cache.clear()
+    elif hasattr(cache, 'flushdb'):
+        cache.flushdb()
+    return {"message": "Cache cleared"}
+
+
+@debug_router.get("/cache/stats", dependencies=[Depends(require_admin)])
+async def cache_stats():
+    """Get cache statistics."""
+    stats = {
+        "backend_type": type(cache).__name__,
+    }
+    
+    if hasattr(cache, '_cache'):
+        stats["total_keys"] = len(cache._cache)
+        stats["maxsize"] = getattr(cache, 'maxsize', 'unknown')
+        # Estimate memory usage
+        import sys
+        total_size = sum(
+            sys.getsizeof(k) + sys.getsizeof(v) 
+            for k, v in cache._cache.items()
+        )
+        stats["estimated_memory_bytes"] = total_size
+    elif hasattr(cache, 'redis'):
+        info = cache.redis.info()
+        stats["redis_version"] = info.get("redis_version")
+        stats["used_memory_human"] = info.get("used_memory_human")
+        stats["total_keys"] = cache.redis.dbsize()
+    
+    return stats
 
