@@ -294,7 +294,8 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-CACHE_BACKEND = os.getenv("APP_CACHE_BACKEND", "memory").lower()
+# CACHE_BACKEND = os.getenv("APP_CACHE_BACKEND", "memory").lower()
+CACHE_BACKEND = os.getenv("APP_REDIS_CONNECTION_STRING", "memory").lower()
 CACHE_TTL_DEFAULT = int(os.getenv("APP_CACHE_TTL", "300"))       # 5 minutes
 CACHE_MAXSIZE = int(os.getenv("APP_CACHE_MAXSIZE", "10000"))
 
