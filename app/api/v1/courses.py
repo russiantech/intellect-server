@@ -1,934 +1,76 @@
-"""
-courses.py — additions and replacements for the existing router.
+# app/api/v1/courses.py
 
-Bugs fixed vs previous version:
-  1. hmac.new()  → hmac.new() is Python 2.  Python 3 uses hmac.new() — actually
-     the correct Python 3 API is:  hmac.new(key, msg, digestmod)  which IS valid,
-     BUT the token URL was built without the /api/v1 prefix so the browser hit
-     /courses/serve/... which isn't a registered route.  Fixed by reading the
-     full API prefix from config (or just prefixing with the router's own path).
-
-  2. Token URL path: was  https://api.example.com/courses/serve/{token}
-                     now  https://api.example.com/api/v1/courses/serve/{token}
-     (matches wherever your router is mounted — driven by API_PREFIX env var)
-
-  3. Text content POST was failing because the TopicContent model may not have
-     a `body` column if it wasn't added yet — added a safe fallback and clearer
-     error.  Also fixed the content_type assignment (CT.text may not exist on
-     older model definitions — falls back to "text" string literal).
-
-  4. Thumbnail drag-and-drop: the upload endpoint now also accepts a PUT so
-     the frontend can call it from a drop handler without a form.
-
-  5. _content_secret() no longer raises on missing env var in dev — it falls
-     back to a local dev secret with a warning, so the serve endpoint works
-     out of the box during development.
-
-Sections:
-  1. _sign / _verify content tokens  (HMAC-SHA256, expiring)
-  2. GET  /serve/{token}             (secure file delivery)
-  3. POST /topics/{id}/content/text  (text/article content, no upload)
-  4. PUT  /courses/{id}/upload-thumbnail  (drag-drop alias)
-  5. POST /courses/{id}/upload-thumbnail  (original, unchanged)
-  6. POST /courses/{id}/topics/{id}/upload-content  (returns token URL)
-  7. PUT  /lessons/reorder           (bulk reorder)
-  8. PUT  /lessons/{id}/topics/reorder (bulk reorder)
-"""
-
-import os
-import hmac
-import hashlib
-import time
-import uuid
+import copy
 import logging
+import os
+import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query, BackgroundTasks
-# from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-import hashlib
-import hmac
-from time import time
 
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
-
-from app.schemas.courses import (
-    ContentReorderItem, CourseApproval, CourseCreate, CourseUpdate, 
-    LessonCreate, LessonUpdate,  TopicCreate, TopicUpdate
-)
-
-from app.enums import CourseStatus
-from sqlalchemy.orm import Session
-
-from app.db.database import get_db
-from app.models.courses import ContentType as CT
-from app.schemas import SuccessResponse
-from app.api.deps.auth import get_current_user, get_current_verified_user, optional_user, require_creator_or_admin
-from app.core.config import get_app_config
-
+from slugify import slugify
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session, joinedload, subqueryload
-from sqlalchemy import or_, func, case
-
-from app.db.database import get_db
-from app.models import (
-    Course, Lesson, Topic, TopicContent, Enrollment, Feedback,
-    Category, Tag, User, LessonAssessment, Quiz, TutorAssignment
-)
-
-from app.schemas import (
-    CourseCreate, CourseUpdate, CourseApproval,
-    LessonCreate, LessonUpdate, TopicCreate, TopicUpdate, 
-    FeedbackCreate, SuccessResponse, 
-    TopicTextContentCreate,  ContentReorderItem
-)
 
 from app.api.deps.auth import (
-    get_current_user, get_current_verified_user,
-    require_admin, require_creator_or_admin, optional_user,
+    get_current_user,
+    get_current_verified_user,
+    optional_user,
+    require_admin,
+    require_creator_or_admin,
 )
-from app.services.email_service import send_course_approved_email, send_course_rejected_email
+
+from app.core.performance.cache_config import cache
 from app.core.config import get_app_config
-from slugify import slugify
+from app.db.database import get_db
+from app.models import (
+    Category,
+    Course,
+    Enrollment,
+    Feedback,
+    Lesson,
+    LessonAssessment,
+    Quiz,
+    Tag,
+    Topic,
+    TopicContent,
+    TutorAssignment,
+    User,
+)
+from app.schemas import (
+    ContentReorderItem,
+    CourseApproval,
+    CourseCreate,
+    CourseUpdate,
+    FeedbackCreate,
+    LessonCreate,
+    LessonUpdate,
+    SuccessResponse,
+    TopicCreate,
+    TopicTextContentCreate,
+    TopicUpdate,
+)
+from app.schemas import ContentType as CT
+from app.schemas import CourseStatus
+from app.services.email_service import send_course_approved_email, send_course_rejected_email
+from app.utils.helpers import _to_cacheable, _invalidate_course_caches
+from app.utils.courses import (
+    ALLOWED_MEDIA,
+    _absolute_url,
+    _course_dict,
+    _make_content_token_url,
+    _make_slug,
+    _mini_user,
+    _verify_content_token,
+)
 
-from app.utils.courses import _pricing_fields
-
-# from app.utils.courses import _build_payment_types, _pricing_fields
 
 router = APIRouter(prefix="/courses", tags=["Courses"])
 logger = logging.getLogger(__name__)
 
-CONTENT_TOKEN_TTL = 3600  # seconds (1 hour)
 
-ALLOWED_MEDIA = {
-    "image/jpeg", "image/png", "image/webp", "image/gif",
-    "video/mp4", "video/webm",
-    "application/pdf",
-    "application/vnd.ms-powerpoint",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-    "audio/mpeg", "audio/wav",
-}
 
-
-# ================================================================
-#  Signed content token helpers
-# ================================================================
-
-def _content_secret() -> bytes:
-    """
-    Return the HMAC signing secret.
-    In production: set CONTENT_SECRET env var to a long random string.
-    In development: falls back to a local dev value with a warning.
-    """
-    secret = os.environ.get("CONTENT_SECRET", "")
-    if not secret:
-        logger.warning(
-            "CONTENT_SECRET is not set — using insecure dev fallback. "
-            "Set this env var before going to production."
-        )
-        secret = "dev-content-secret-change-me"
-    return secret.encode()
-
-
-def _sign_content_token(content_id: int, user_id: int, expires_at: int) -> str:
-    """
-    Build an HMAC-SHA256 signed token.
-    Format: {content_id}.{user_id}.{expires_at}.{hex_sig}
-
-    Python 3 hmac API: hmac.new(key: bytes, msg: bytes, digestmod) -> HMAC
-    """
-    payload = f"{content_id}.{user_id}.{expires_at}"
-    h = hmac.new(_content_secret(), payload.encode("utf-8"), hashlib.sha256)
-    return f"{payload}.{h.hexdigest()}"
-
-
-def _verify_content_token(token: str) -> tuple:
-    """
-    Verify a signed token.  Returns (content_id, user_id) or raises 403.
-
-    SHA-256 hex digest is always exactly 64 chars of [0-9a-f] — no dots.
-    Splitting with maxsplit=3 safely isolates the signature regardless of IDs.
-    """
-    try:
-        content_id_s, user_id_s, expires_at_s, sig = token.split(".", maxsplit=3)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Malformed content token")
-
-    payload = f"{content_id_s}.{user_id_s}.{expires_at_s}"
-    expected = hmac.new(
-        _content_secret(), payload.encode("utf-8"), hashlib.sha256
-    ).hexdigest()
-
-    # Constant-time comparison prevents timing attacks
-    if not hmac.compare_digest(expected, sig):
-        raise HTTPException(status_code=403, detail="Invalid content token")
-
-    if int(expires_at_s) < int(time()):
-        raise HTTPException(status_code=403, detail="Content token expired")
-
-    return int(content_id_s), int(user_id_s)
-
-
-def _make_content_token_url(content, user_id: int) -> str:
-    """
-    Build a fully-qualified, signed serve URL for a content item.
-
-    ROOT CAUSE OF 404s:
-    The previous version built  /courses/serve/{token}
-    but the router is mounted at /api/v1, making the real path
-    /api/v1/courses/serve/{token}.
-
-    We read API_PREFIX from the environment (default "/api/v1") so this
-    works across dev / staging / production without hard-coding.
-
-    Add to your .env:
-        API_PREFIX=/api/v1          # must match your FastAPI mount prefix
-        CONTENT_SECRET=<random>     # openssl rand -hex 32
-    """
-    expires_at = int(time()) + CONTENT_TOKEN_TTL
-    token = _sign_content_token(content.id, user_id, expires_at)
-
-    cfg = get_app_config()
-    api_base = cfg.hosting_config.api_url.rstrip("/")
-    api_prefix = os.environ.get("API_PREFIX", "/api/v1").rstrip("/")
-
-    return f"{api_base}{api_prefix}/courses/serve/{token}"
-
-
-def _absolute_url(path, folder: str = "courses/thumbnails"):
-    if not path:
-        return None
-    if path.startswith("http"):
-        return path
-    cfg = get_app_config()
-    base = cfg.hosting_config.api_url.rstrip("/")
-    if path.startswith("/"):
-        return f"{base}{path}"
-    return f"{base}/uploads/{folder}/{path}"
-
-
-# ================================================================
-#  Serve handler — wire as:  @router.get("/serve/{token}")
-# ================================================================
-
-async def serve_content_handler(token: str, db: Session):
-    """
-    Token-gated file delivery.  The raw file path is never sent to the browser.
-
-    Security:
-    - HMAC-signed  → cannot be forged
-    - Expiry embedded → links auto-expire (default 1h)
-    - user_id embedded → sharing URL with another user returns 403
-    - Enrollment re-checked → defense in depth
-    - Cache-Control: no-store → browser won't cache the signed URL
-    """
-    content_id, user_id = _verify_content_token(token)
-
-    tc = db.query(TopicContent).filter(TopicContent.id == content_id).first()
-    if not tc:
-        raise HTTPException(status_code=404, detail="Content not found")
-
-    topic = db.query(Topic).filter(Topic.id == tc.topic_id).first()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
-
-    if not topic.is_free_preview:
-        enrolled = db.query(Enrollment).filter(
-            Enrollment.user_id == user_id,
-            Enrollment.course_id == topic.course_id,
-        ).first()
-        user_obj = db.query(User).filter(User.id == user_id).first()
-        is_admin   = user_obj and user_obj.is_admin()
-        is_creator = topic.course and topic.course.creator_id == user_id
-        if not (enrolled or is_admin or is_creator):
-            raise HTTPException(status_code=403, detail="Access denied")
-
-    # Text content — body returned inline, no file
-    if getattr(tc, "body", None) is not None and not tc.file_path:
-        return {"content_type": "text", "title": tc.title, "body": tc.body}
-
-    if not tc.file_path:
-        raise HTTPException(status_code=404, detail="No file for this content item")
-
-    cfg = get_app_config()
-    file_path = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "content", tc.file_path,
-    )
-
-    if not os.path.exists(file_path):
-        logger.error(
-            "Content file missing: %s (content_id=%s, stored path=%s)",
-            file_path, content_id, tc.file_path,
-        )
-        raise HTTPException(status_code=404, detail="File not found on server")
-
-    return FileResponse(
-        path=file_path,
-        media_type=tc.mime_type or "application/octet-stream",
-        filename=tc.title or tc.file_path,
-        headers={
-            "Cache-Control":         "no-store, no-cache, must-revalidate, private",
-            "Pragma":                "no-cache",
-            "X-Frame-Options":       "SAMEORIGIN",
-            "X-Content-Type-Options":"nosniff",
-        },
-    )
-
-
-# ================================================================
-#  get_topic_content handler — override existing route
-#  Wire as:  @router.get("/{course_id}/topics/{topic_id}/content")
-# ================================================================
-
-async def get_topic_content_handler(course_id: int, topic_id: int, user, db: Session):
-    topic = db.query(Topic).filter(
-        Topic.id == topic_id, Topic.course_id == course_id
-    ).first()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
-
-    if not topic.is_free_preview:
-        enrolled = db.query(Enrollment).filter(
-            Enrollment.user_id == user.id,
-            Enrollment.course_id == course_id,
-        ).first()
-        if not enrolled and not user.is_admin():
-            raise HTTPException(status_code=403, detail="Enrollment required")
-
-    text_ct_values = {"text"}
-    if hasattr(CT, "text"):
-        text_ct_values.add(CT.text)
-
-    def _item(c) -> dict:
-        is_text = (
-            c.content_type in text_ct_values
-            or (getattr(c, "body", None) is not None and not c.file_path)
-        )
-        return {
-            "id":               c.id,
-            "title":            c.title,
-            "content_type":     c.content_type,
-            "url":              None if is_text else _make_content_token_url(c, user.id),
-            "body":             getattr(c, "body", None) if is_text else None,
-            "duration_seconds": getattr(c, "duration_seconds", None),
-            "order_index":      c.order_index,
-        }
-
-    return {
-        "id":          topic.id,
-        "title":       topic.title,
-        "description": topic.description,
-        "contents":    [_item(c) for c in sorted(topic.contents, key=lambda x: x.order_index)],
-    }
-
-
-# ================================================================
-#  Text content handler
-#  Wire as:  @router.post("/{course_id}/topics/{topic_id}/content/text")
-# ================================================================
-
-async def add_text_content_handler(
-    course_id: int,
-    topic_id: int,
-    payload: TopicTextContentCreate,
-    user,
-    db: Session,
-):
-    if not payload.title.strip():
-        raise HTTPException(status_code=422, detail="Title is required")
-    if not payload.body.strip():
-        raise HTTPException(status_code=422, detail="Body is required")
-
-    topic = db.query(Topic).filter(
-        Topic.id == topic_id, Topic.course_id == course_id
-    ).first()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
-
-    course = topic.course
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Safely resolve CT.text — fall back to string "text" if model is older
-    text_ct = getattr(CT, "text", "text")
-
-    tc = TopicContent(
-        title=payload.title.strip(),
-        content_type=text_ct,
-        topic_id=topic_id,
-        order_index=len(topic.contents),
-        # file_path / mime_type / file_size_bytes intentionally omitted
-    )
-    # Set body via setattr so models without the column degrade gracefully
-    try:
-        tc.body = payload.body
-    except AttributeError:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "The TopicContent model does not have a `body` column. "
-                "Add `body = Column(Text, nullable=True)` to your model and run a migration."
-            ),
-        )
-
-    db.add(tc)
-    db.commit()
-    db.refresh(tc)
-
-    return {
-        "id":           tc.id,
-        "title":        tc.title,
-        "content_type": "text",
-        "body":         getattr(tc, "body", None),
-        "url":          None,
-        "order_index":  tc.order_index,
-    }
-
-
-# ================================================================
-#  Thumbnail upload handler (shared by POST and PUT)
-#  Wire as:
-#    @router.post("/{course_id}/upload-thumbnail")
-#    @router.put("/{course_id}/upload-thumbnail")
-# ================================================================
-
-async def upload_thumbnail_handler(course_id: int, file: UploadFile, user, db: Session) -> dict:
-    course = db.query(Course).filter(Course.id == course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "thumbnails",
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext      = (file.filename or "upload").rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    content  = await file.read()
-
-    with open(os.path.join(upload_dir, filename), "wb") as f:
-        f.write(content)
-
-    # Clean up old file (non-fatal if it fails)
-    if course.thumbnail and not course.thumbnail.startswith("http"):
-        old = os.path.join(upload_dir, course.thumbnail)
-        try:
-            if os.path.isfile(old):
-                os.remove(old)
-        except OSError:
-            pass
-
-    course.thumbnail = filename
-    db.commit()
-
-    return {
-        "thumbnail": filename,
-        "url":       _absolute_url(filename, "courses/thumbnails"),
-    }
-
-
-# ================================================================
-#  Topic content upload handler
-#  Wire as:  @router.post("/{course_id}/topics/{topic_id}/upload-content")
-# ================================================================
-
-async def upload_topic_content_handler(
-    course_id: int, topic_id: int, file: UploadFile, user, db: Session
-) -> dict:
-    topic = db.query(Topic).filter(
-        Topic.id == topic_id, Topic.course_id == course_id
-    ).first()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
-
-    course = topic.course
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if file.content_type not in ALLOWED_MEDIA:
-        raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
-
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "content",
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext      = (file.filename or "upload").rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    content  = await file.read()
-
-    max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(status_code=400, detail="File too large")
-
-    with open(os.path.join(upload_dir, filename), "wb") as f:
-        f.write(content)
-
-    mime = file.content_type or "application/octet-stream"
-    if   "video"       in mime: ct = getattr(CT, "video", "video")
-    elif "pdf"         in mime: ct = getattr(CT, "pdf",   "pdf")
-    elif "image"       in mime: ct = getattr(CT, "image", "image")
-    elif "powerpoint"  in mime or "presentation" in mime: ct = getattr(CT, "ppt", "ppt")
-    elif "audio"       in mime: ct = getattr(CT, "audio", "audio")
-    else:                        ct = getattr(CT, "doc",   "doc")
-
-    tc = TopicContent(
-        title=file.filename, content_type=ct,
-        file_path=filename, mime_type=mime,
-        file_size_bytes=len(content),
-        topic_id=topic_id,
-        order_index=len(topic.contents),
-    )
-    db.add(tc)
-    db.commit()
-    db.refresh(tc)
-
-    return {
-        "id":           tc.id,
-        "title":        file.filename,
-        "content_type": ct,
-        "url":          _make_content_token_url(tc, user.id),  # signed, never raw path
-        "mime_type":    mime,
-        "order_index":  tc.order_index,
-    }
-
-
-async def reorder_lessons_handler(course_id: int, items: list, user, db: Session):
-    course = db.query(Course).filter(Course.id == course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    id_map = {item.id: item.order_index for item in items}
-    for lesson in db.query(Lesson).filter(
-        Lesson.course_id == course_id, Lesson.id.in_(id_map)
-    ).all():
-        lesson.order_index = id_map[lesson.id]
-    db.commit()
-    return SuccessResponse(message="Lessons reordered")
-
-
-async def reorder_topics_handler(
-    course_id: int, lesson_id: int, items: list, user, db: Session
-):
-    lesson = db.query(Lesson).filter(
-        Lesson.id == lesson_id, Lesson.course_id == course_id
-    ).first()
-    if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
-    if lesson.course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    id_map = {item.id: item.order_index for item in items}
-    for topic in db.query(Topic).filter(
-        Topic.lesson_id == lesson_id, Topic.id.in_(id_map)
-    ).all():
-        topic.order_index = id_map[topic.id]
-    db.commit()
-    return SuccessResponse(message="Topics reordered")
-
-
-def _make_slug(title: str, db: Session, exclude_id: int = None) -> str:
-    base = slugify(title)
-    slug, counter = base, 1
-    while True:
-        q = db.query(Course).filter(Course.slug == slug)
-        if exclude_id:
-            q = q.filter(Course.id != exclude_id)
-        if not q.first():
-            return slug
-        slug = f"{base}-{counter}"
-        counter += 1
-
-
-# def _course_dict(course: Course, user: Optional[User] = None) -> dict:
-#     enrollment = None
-#     if user:
-#         enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
-
-#     avg_rating = None
-#     if course.feedbacks:
-#         avg_rating = round(
-#             sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
-#         )
-
-#     return {
-#         "id": course.id,
-#         "title": course.title,
-#         "slug": course.slug,
-#         "description": course.description,
-#         "short_description": course.short_description,
-#         "thumbnail":     _absolute_url(course.thumbnail,     "courses/thumbnails"),
-#         "preview_video": _absolute_url(course.preview_video, "courses/previews"),
-#         "fee": course.fee,
-#         "payment_type": course.payment_type,
-#         "subscription_interval": course.subscription_interval,
-#         "subscription_installments": course.subscription_installments,
-#         "lang": course.lang,
-#         "duration_weeks": course.duration_weeks,
-#         "level": course.level,
-#         "status": course.status,
-#         "views": course.views,
-#         "featured": course.featured,
-#         "requirements": course.requirements,
-#         "what_you_learn": course.what_you_learn,
-#         "creator_pct":  course.creator_pct,
-#         "platform_pct": course.platform_pct,
-#         "creator_id": course.creator_id,
-#         "throttle_enabled": course.throttle_enabled,
-#         "weekly_topic_limit": course.weekly_topic_limit,
-#         "monthly_topic_limit": course.monthly_topic_limit,
-#         "creator": _mini_user(course.creator) if course.creator else None,
-#         "categories": [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
-#         "tags": [{"id": t.id, "name": t.name} for t in course.tags],
-#         "lessons_count": len(course.lessons),
-#         "topics_count": sum(len(l.topics) for l in course.lessons),
-#         "enrolled_count": len(course.enrollments),
-#         "avg_rating": avg_rating,
-#         "is_enrolled": enrollment is not None,
-#         "progress_pct": enrollment.progress_pct if enrollment else 0.0,
-#         "created_at": course.created_at,
-#         "approved_at": course.approved_at,
-#         "rejection_reason": course.rejection_reason,
-#     }
-
-
-def _mini_user(user: User) -> dict:
-    return {
-        "id": user.id, "name": user.name, "username": user.username,
-        "image": _absolute_url(user.image, "avatars"),
-        "title": user.title,
-    }
-
-# v2
-# # +++++++++++++++++++
-# # courses.py — _course_dict and _build_payment_types
-# #
-# # PATCH — drop these two functions in to replace the existing _course_dict.
-# # The rest of the file is unchanged.
-# #
-# # What changed and why
-# # ─────────────────────────────────────────────────────────────────────────
-# # 1. available_payment_types is now built and returned.
-# #    The frontend's derivePaymentOptions() always prefers this array; without
-# #    it the fallback had to guess fees from the single `fee` field, which is
-# #    0 for subscription/PAYG courses that store the real fee in a separate
-# #    column (subscription_fee / pay_as_you_go_fee).
-# #
-# # 2. subscription_fee, pay_as_you_go_fee, access_period_days,
-# #    instructor_led_fee are all returned as top-level fields so the frontend
-# #    can also read them directly when building its own UI (price blocks,
-# #    "includes" list, billing descriptions, etc.).
-# #
-# # 3. _build_payment_types is a pure helper that reads exactly the columns
-# #    each payment model actually uses — no cross-type fee leakage.
-# # ─────────────────────────────────────────────────────────────────────────
-
-# from typing import Optional
-# # (existing imports already present in the file — shown here for context only)
-
-
-# def _build_payment_types(course) -> list:
-#     """
-#     Build the available_payment_types list consumed by the frontend
-#     PaymentTypeSelector.  Each entry's `fee` is the actual charge amount
-#     for that billing model, not the generic `course.fee` column.
-#     """
-#     pt = course.payment_type or "one_time"
-
-#     if pt == "free":
-#         return [{"payment_type": "free", "fee": 0, "label": "Free"}]
-
-#     if pt == "one_time":
-#         return [{
-#             "payment_type": "one_time",
-#             "fee":           float(course.fee or 0),
-#             "label":         "One-time",
-#         }]
-
-#     if pt == "subscription":
-#         # Use subscription_fee when set; fall back to fee
-#         sub_fee  = float(
-#             getattr(course, "subscription_fee", None)
-#             or course.fee
-#             or 0
-#         )
-#         interval = (course.subscription_interval or "monthly").lower()
-#         label    = interval.capitalize() + "ly"   # "monthly" → "Monthly" → "Monthlyly"
-#         # Better: map known intervals
-#         label_map = {
-#             "weekly": "Weekly", "monthly": "Monthly",
-#             "quarterly": "Quarterly", "yearly": "Yearly",
-#         }
-#         label = label_map.get(interval, label)
-#         return [{
-#             "payment_type":          "subscription",
-#             "fee":                   sub_fee,
-#             "subscription_interval": interval,
-#             "label":                 label,
-#         }]
-
-#     if pt == "pay_as_you_go":
-#         payg_fee   = float(
-#             getattr(course, "pay_as_you_go_fee", None)
-#             or course.fee
-#             or 0
-#         )
-#         access_days = int(getattr(course, "access_period_days", None) or 30)
-#         return [{
-#             "payment_type":       "pay_as_you_go",
-#             "fee":                payg_fee,
-#             "access_period_days": access_days,
-#             "label":              "Pay-as-you-go",
-#         }]
-
-#     # Unknown type — return as-is
-#     return [{"payment_type": pt, "fee": float(course.fee or 0), "label": pt}]
-
-
-# def _course_dict(course, user: Optional = None) -> dict:
-#     enrollment = None
-#     if user:
-#         enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
-
-#     avg_rating = None
-#     if course.feedbacks:
-#         avg_rating = round(
-#             sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
-#         )
-
-#     return {
-#         "id":                        course.id,
-#         "title":                     course.title,
-#         "slug":                      course.slug,
-#         "description":               course.description,
-#         "short_description":         course.short_description,
-#         "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
-#         "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
-
-#         # ── Payment fields ────────────────────────────────────────────────────
-#         # fee          = the generic / base price column (used for one_time)
-#         # subscription_fee   = per-period fee for subscription billing
-#         # pay_as_you_go_fee  = per-window fee for PAYG billing
-#         # instructor_led_fee = optional uplift when student opts into live sessions
-#         # access_period_days = number of days unlocked by one PAYG payment
-#         #
-#         # available_payment_types is pre-built so the frontend pill-switcher
-#         # can render correctly without extra API calls.
-#         "fee":                       float(course.fee or 0),
-#         "payment_type":              course.payment_type,
-#         "subscription_interval":     course.subscription_interval,
-#         "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
-#         "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
-#         "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
-#         "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
-#         "available_payment_types":   _build_payment_types(course),
-#         # ─────────────────────────────────────────────────────────────────────
-
-#         "subscription_installments": course.subscription_installments,
-#         "lang":                      course.lang,
-#         "duration_weeks":            course.duration_weeks,
-#         "level":                     course.level,
-#         "status":                    course.status,
-#         "views":                     course.views,
-#         "featured":                  course.featured,
-#         "requirements":              course.requirements,
-#         "what_you_learn":            course.what_you_learn,
-#         "creator_pct":               course.creator_pct,
-#         "platform_pct":              course.platform_pct,
-#         "creator_id":                course.creator_id,
-#         "throttle_enabled":          course.throttle_enabled,
-#         "weekly_topic_limit":        course.weekly_topic_limit,
-#         "monthly_topic_limit":       course.monthly_topic_limit,
-#         "creator":                   _mini_user(course.creator) if course.creator else None,
-#         "categories":                [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
-#         "tags":                      [{"id": t.id, "name": t.name} for t in course.tags],
-#         "lessons_count":             len(course.lessons),
-#         "topics_count":              sum(len(l.topics) for l in course.lessons),
-#         "enrolled_count":            len(course.enrollments),
-#         "avg_rating":                avg_rating,
-#         "is_enrolled":               enrollment is not None,
-#         "progress_pct":              enrollment.progress_pct if enrollment else 0.0,
-#         "created_at":                course.created_at,
-#         "approved_at":               course.approved_at,
-#         "rejection_reason":          course.rejection_reason,
-#     }
-
-# # +++++++++++++++++++
-
-# v3
-# courses.py — replace _build_payment_types AND _course_dict
-#
-# Problem
-# ───────
-# _build_payment_types returned only ONE option (the course's primary
-# payment_type).  If a course has fee=5000 AND subscription_fee=2000 set,
-# only the primary type was shown.  Students had no way to choose.
-#
-# Fix — same rule as _derive_payment_types for paths:
-#   fee > 0              → "One-time" available
-#   subscription_fee > 0 → "Subscription" available
-#   pay_as_you_go_fee > 0→ "Pay-as-you-go" available
-#   payment_type='free'  → only "Free", nothing else
-#
-# _course_dict is updated to include all fee columns so the frontend
-# pill-switcher can render the correct price for each option.
-
-
-# INTERVAL_LABELS = {
-#     "weekly":    "Weekly",
-#     "monthly":   "Monthly",
-#     "quarterly": "Quarterly",
-#     "yearly":    "Yearly",
-# }
-
-
-# def _build_payment_types(course) -> list:
-#     """
-#     Return all billing options available to students for this course.
-#     Each entry:
-#         {
-#             "payment_type":          str,
-#             "fee":                   float,
-#             "subscription_interval": str | None,
-#             "access_period_days":    int | None,
-#             "label":                 str,
-#         }
-#     """
-#     pt = getattr(course, "payment_type", None) or "one_time"
-
-#     # Free course — nothing else
-#     if pt == "free":
-#         return [{"payment_type": "free", "fee": 0, "label": "Free",
-#                  "subscription_interval": None, "access_period_days": None}]
-
-#     options: list = []
-
-#     # One-time
-#     one_time_fee = float(getattr(course, "fee", None) or 0)
-#     if one_time_fee > 0:
-#         options.append({
-#             "payment_type":          "one_time",
-#             "fee":                   one_time_fee,
-#             "label":                 "One-time",
-#             "subscription_interval": None,
-#             "access_period_days":    None,
-#         })
-
-#     # Subscription
-#     sub_fee = float(getattr(course, "subscription_fee", None) or 0)
-#     if sub_fee > 0:
-#         interval = (getattr(course, "subscription_interval", None) or "monthly").lower()
-#         options.append({
-#             "payment_type":          "subscription",
-#             "fee":                   sub_fee,
-#             "label":                 INTERVAL_LABELS.get(interval, "Subscription"),
-#             "subscription_interval": interval,
-#             "access_period_days":    None,
-#         })
-
-#     # Pay-as-you-go
-#     payg_fee = float(getattr(course, "pay_as_you_go_fee", None) or 0)
-#     if payg_fee > 0:
-#         access_days = int(getattr(course, "access_period_days", None) or 30)
-#         options.append({
-#             "payment_type":          "pay_as_you_go",
-#             "fee":                   payg_fee,
-#             "label":                 "Pay-as-you-go",
-#             "subscription_interval": None,
-#             "access_period_days":    access_days,
-#         })
-
-#     # Fallback
-#     if not options:
-#         options.append({
-#             "payment_type":          pt,
-#             "fee":                   one_time_fee,
-#             "label":                 {"one_time": "One-time"}.get(pt, pt),
-#             "subscription_interval": None,
-#             "access_period_days":    None,
-#         })
-
-#     return options
-
-# v2
-
-def _course_dict(course, user: Optional = None) -> dict:
-    enrollment = None
-    if user:
-        enrollment = next((e for e in course.enrollments if e.user_id == user.id), None)
-
-    avg_rating = None
-    if course.feedbacks:
-        avg_rating = round(
-            sum(f.rating for f in course.feedbacks) / len(course.feedbacks), 1
-        )
-
-    return {
-        "id":                        course.id,
-        "title":                     course.title,
-        "slug":                      course.slug,
-        "description":               course.description,
-        "short_description":         course.short_description,
-        "thumbnail":                 _absolute_url(course.thumbnail,     "courses/thumbnails"),
-        "preview_video":             _absolute_url(course.preview_video, "courses/previews"),
-
-        # ── All fee columns returned so the frontend can render any option ──
-        # "fee":                       float(course.fee or 0),
-        # "payment_type":              course.payment_type,
-        # "subscription_interval":     course.subscription_interval,
-        # "subscription_fee":          float(getattr(course, "subscription_fee",   None) or 0),
-        # "pay_as_you_go_fee":         float(getattr(course, "pay_as_you_go_fee",  None) or 0),
-        # "access_period_days":        int(  getattr(course, "access_period_days", None) or 30),
-        # "instructor_led_fee":        float(getattr(course, "instructor_led_fee", None) or 0),
-
-        # ── Pre-built option list — consumed by PaymentTypeSelector ─────────
-        # Contains one entry per non-zero fee field, each with the correct
-        # fee for that billing model (not always course.fee).
-        # "available_payment_types":   _build_payment_types(course),
-        # ────────────────────────────────────────────────────────────────────
-
-        # 
-        **_pricing_fields(course),
-        
-        "subscription_installments": course.subscription_installments,
-        "lang":                      course.lang,
-        "duration_weeks":            course.duration_weeks,
-        "level":                     course.level,
-        "status":                    course.status,
-        "views":                     course.views,
-        "featured":                  course.featured,
-        "requirements":              course.requirements,
-        "what_you_learn":            course.what_you_learn,
-        "creator_pct":               course.creator_pct,
-        "platform_pct":              course.platform_pct,
-        "creator_id":                course.creator_id,
-        "throttle_enabled":          course.throttle_enabled,
-        "weekly_topic_limit":        course.weekly_topic_limit,
-        "monthly_topic_limit":       course.monthly_topic_limit,
-        "creator":                   _mini_user(course.creator) if course.creator else None,
-        "categories":                [{"id": c.id, "title": c.title, "slug": c.slug} for c in course.categories],
-        "tags":                      [{"id": t.id, "name": t.name} for t in course.tags],
-        "lessons_count":             len(course.lessons),
-        "topics_count":              sum(len(l.topics) for l in course.lessons),
-        "enrolled_count":            len(course.enrollments),
-        "avg_rating":                avg_rating,
-        "is_enrolled":               enrollment is not None,
-        "progress_pct":              enrollment.progress_pct if enrollment else 0.0,
-        "created_at":                course.created_at,
-        "approved_at":               course.approved_at,
-        "rejection_reason":          course.rejection_reason,
-    }
-
-
-# ─────────────────────────────────────────────
-#  Secure content serving
-# ─────────────────────────────────────────────
+# ── Secure content serving ────────────────────────────────────────────────────
 
 @router.get("/serve/{token}")
 async def serve_content(
@@ -938,15 +80,11 @@ async def serve_content(
     """
     Token-gated file delivery.
 
-    The client never sees the real filesystem path.  The token is verified
-    (HMAC + expiry) before we read from disk, so:
-      • Sharing the URL with another user: rejected (user_id mismatch embedded)
-      • Link expiry: rejected after TTL seconds
-      • Path guessing: impossible — token contains no path information
-      • DevTools inspection: reveals only the opaque /serve/{token} URL
+    The client never sees the real filesystem path. The HMAC token is verified
+    (signature + expiry + embedded user_id) before any file is read from disk.
 
-    For production, replace FileResponse with a redirect to a private
-    S3/GCS pre-signed URL for zero-latency streaming.
+    For production at scale, replace FileResponse with a redirect to a private
+    S3/GCS pre-signed URL for zero-latency streaming without touching the app server.
     """
     content_id, user_id = _verify_content_token(token)
 
@@ -954,8 +92,6 @@ async def serve_content(
     if not tc:
         raise HTTPException(status_code=404, detail="Content not found")
 
-    # Re-verify enrollment (token could be forged by replaying an old
-    # valid-looking token structure — defense in depth)
     topic = db.query(Topic).filter(Topic.id == tc.topic_id).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
@@ -972,12 +108,7 @@ async def serve_content(
             raise HTTPException(status_code=403, detail="Access denied")
 
     if tc.body is not None:
-        # Text content — return as JSON, no file needed
-        return {
-            "content_type": "text",
-            "title": tc.title,
-            "body": tc.body,
-        }
+        return {"content_type": "text", "title": tc.title, "body": tc.body}
 
     if not tc.file_path:
         raise HTTPException(status_code=404, detail="No file attached to this content")
@@ -990,53 +121,44 @@ async def serve_content(
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on server")
 
-    # Stream with explicit headers that block browser caching of the URL
-    # and prevent cross-origin embedding (Content-Security-Policy).
     return FileResponse(
         path=file_path,
         media_type=tc.mime_type or "application/octet-stream",
         filename=tc.title or tc.file_path,
         headers={
-            # Prevent the browser from storing the file in cache
             "Cache-Control": "no-store, no-cache, must-revalidate, private",
             "Pragma": "no-cache",
-            # Block embedding in iframes from other origins
             "X-Frame-Options": "SAMEORIGIN",
             "Content-Security-Policy": "default-src 'self'",
-            # Prevent MIME sniffing
             "X-Content-Type-Options": "nosniff",
         },
     )
 
 
-# ─────────────────────────────────────────────
-#  Existing topic-content endpoint — now returns token URLs
-# ─────────────────────────────────────────────
-
-# v2 - allows anonymous users for previews:
-# In courses.py — replace BOTH get_topic_content definitions with this ONE:
+# ── Topic content ─────────────────────────────────────────────────────────────
 
 @router.get("/{course_id}/topics/{topic_id}/content")
 async def get_topic_content(
     course_id: int,
     topic_id: int,
-    user: Optional[User] = Depends(optional_user),  # ← CHANGED: was get_current_user
+    user: Optional[User] = Depends(optional_user),
     db: Session = Depends(get_db),
 ):
+    """
+    Return the content items for a topic.
+    Free previews are accessible anonymously; paid content requires enrollment.
+    Anonymous users receive direct (unsigned) URLs for preview files.
+    Authenticated users receive short-lived HMAC-signed token URLs.
+    """
     topic = db.query(Topic).filter(
-        Topic.id == topic_id, Topic.course_id == course_id
+        Topic.id == topic_id, Topic.course_id == course_id,
     ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    # ── Access control ──
-    # Free previews: allow anonymous AND authenticated users
-    # Paid content: require enrollment (or admin/creator)
     if not topic.is_free_preview:
-        # Must be logged in to access non-preview content
         if user is None:
             raise HTTPException(status_code=401, detail="Authentication required")
-        
         enrolled = db.query(Enrollment).filter(
             Enrollment.user_id == user.id,
             Enrollment.course_id == course_id,
@@ -1044,21 +166,14 @@ async def get_topic_content(
         if not enrolled and not user.is_admin():
             raise HTTPException(status_code=403, detail="Enrollment required")
 
-    # ── Build response ──
-    # For anonymous users on free previews, we can't generate signed tokens
-    # (tokens are user-specific). Return public URLs for previews instead.
     def _item(c: TopicContent) -> dict:
         is_text = c.content_type == CT.text or (
             getattr(c, "body", None) is not None and not c.file_path
         )
-        
-        # Anonymous users get direct (unsigned) URLs for preview content
-        # Authenticated users get signed tokens for tracking/security
         if user is None:
             url = None if is_text else _absolute_url(c.file_path, "courses/content")
         else:
             url = None if is_text else _make_content_token_url(c, user.id)
-        
         return {
             "id": c.id,
             "title": c.title,
@@ -1073,15 +188,12 @@ async def get_topic_content(
         "id": topic.id,
         "title": topic.title,
         "description": topic.description,
-        "contents": [
-            _item(c) for c in sorted(topic.contents, key=lambda x: x.order_index)
-        ],
+        "contents": [_item(c) for c in sorted(topic.contents, key=lambda x: x.order_index)],
     }
 
 
-# ─────────────────────────────────────────────
-#  Text content authoring
-# ─────────────────────────────────────────────
+# ── Text content authoring ────────────────────────────────────────────────────
+
 @router.post("/{course_id}/topics/{topic_id}/content/text", status_code=201)
 async def add_text_content(
     course_id: int,
@@ -1090,11 +202,10 @@ async def add_text_content(
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    """
-    Store text/article content directly in the database body field —
-    no file upload required.  Ideal for lecture notes, articles, quizzes.
-    """
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    """Store text/article content directly in the DB — no file upload required."""
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
 
@@ -1116,83 +227,19 @@ async def add_text_content(
     db.commit()
     db.refresh(tc)
 
+    # Course structure changed — invalidate detail cache
+    _invalidate_course_caches(course_id, slug=course.slug)
+
     return {
         "id": tc.id,
         "title": tc.title,
         "content_type": "text",
         "body": tc.body,
         "order_index": tc.order_index,
-        # No URL needed — body is returned inline
         "url": None,
     }
 
-@router.put("/{course_id}/lessons/reorder")
-async def reorder_lessons(
-    course_id: int,
-    items: list[ContentReorderItem],
-    user: User = Depends(get_current_verified_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Bulk-update order_index for all lessons of a course in one request.
-    Frontend sends the full ordered list after drag-and-drop.
-    """
-    course = db.query(Course).filter(Course.id == course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
 
-    id_map = {item.id: item.order_index for item in items}
-    lessons = db.query(Lesson).filter(
-        Lesson.course_id == course_id,
-        Lesson.id.in_(id_map.keys()),
-    ).all()
-
-    for lesson in lessons:
-        lesson.order_index = id_map[lesson.id]
-
-    db.commit()
-    return SuccessResponse(message="Lessons reordered")
-
-
-# ─────────────────────────────────────────────
-#  Reorder topics within a lesson
-# ─────────────────────────────────────────────
-
-@router.put("/{course_id}/lessons/{lesson_id}/topics/reorder")
-async def reorder_topics(
-    course_id: int,
-    lesson_id: int,
-    items: list[ContentReorderItem],
-    user: User = Depends(get_current_verified_user),
-    db: Session = Depends(get_db),
-):
-    """
-    Bulk-update order_index for all topics of a lesson in one request.
-    """
-    lesson = db.query(Lesson).filter(
-        Lesson.id == lesson_id, Lesson.course_id == course_id,
-    ).first()
-    if not lesson:
-        raise HTTPException(status_code=404, detail="Lesson not found")
-    if lesson.course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    id_map = {item.id: item.order_index for item in items}
-    topics = db.query(Topic).filter(
-        Topic.lesson_id == lesson_id,
-        Topic.id.in_(id_map.keys()),
-    ).all()
-
-    for topic in topics:
-        topic.order_index = id_map[topic.id]
-
-    db.commit()
-    return SuccessResponse(message="Topics reordered")
-
-
-# 
 @router.patch("/{course_id}/topics/{topic_id}/content/{content_id}/text")
 async def update_text_content(
     course_id: int,
@@ -1202,12 +249,6 @@ async def update_text_content(
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    """ 
-        PATCH /courses/{course_id}/topics/{topic_id}/content/{content_id}/text
-        — Edit existing text content body/title
-   
-    """
-    from app.models.courses import TopicContent
     tc = db.query(TopicContent).filter(
         TopicContent.id == content_id,
         TopicContent.topic_id == topic_id,
@@ -1215,10 +256,12 @@ async def update_text_content(
     if not tc:
         raise HTTPException(status_code=404, detail="Content not found")
 
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
-    
+
     course = db.query(Course).filter(Course.id == course_id).first()
     if not user.is_admin() and course.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
@@ -1230,6 +273,10 @@ async def update_text_content(
 
     db.commit()
     db.refresh(tc)
+
+    # Content body changed — detail cache is stale
+    _invalidate_course_caches(course_id, slug=course.slug)
+
     return {
         "id": tc.id,
         "title": tc.title,
@@ -1240,6 +287,64 @@ async def update_text_content(
     }
 
 
+# ── Reorder operations ────────────────────────────────────────────────────────
+
+@router.put("/{course_id}/lessons/reorder")
+async def reorder_lessons(
+    course_id: int,
+    items: list[ContentReorderItem],
+    user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db),
+):
+    """Bulk-update lesson order_index after drag-and-drop."""
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if course.creator_id != user.id and not user.is_admin():
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    id_map = {item.id: item.order_index for item in items}
+    for lesson in db.query(Lesson).filter(
+        Lesson.course_id == course_id, Lesson.id.in_(id_map.keys()),
+    ).all():
+        lesson.order_index = id_map[lesson.id]
+
+    db.commit()
+
+    # Lesson order is part of the cached course structure
+    _invalidate_course_caches(course_id, slug=course.slug)
+    return SuccessResponse(message="Lessons reordered")
+
+
+@router.put("/{course_id}/lessons/{lesson_id}/topics/reorder")
+async def reorder_topics(
+    course_id: int,
+    lesson_id: int,
+    items: list[ContentReorderItem],
+    user: User = Depends(get_current_verified_user),
+    db: Session = Depends(get_db),
+):
+    """Bulk-update topic order_index within a lesson after drag-and-drop."""
+    lesson = db.query(Lesson).filter(
+        Lesson.id == lesson_id, Lesson.course_id == course_id,
+    ).first()
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    if lesson.course.creator_id != user.id and not user.is_admin():
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    id_map = {item.id: item.order_index for item in items}
+    for topic in db.query(Topic).filter(
+        Topic.lesson_id == lesson_id, Topic.id.in_(id_map.keys()),
+    ).all():
+        topic.order_index = id_map[topic.id]
+
+    db.commit()
+
+    _invalidate_course_caches(course_id, slug=lesson.course.slug)
+    return SuccessResponse(message="Topics reordered")
+
+
 @router.put("/{course_id}/topics/{topic_id}/content/reorder")
 async def reorder_topic_content(
     course_id: int,
@@ -1248,25 +353,28 @@ async def reorder_topic_content(
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    """ 
-        POST /courses/{course_id}/topics/{topic_id}/content/{content_id}/reorder
-        — Reorder content within a topic (drag-drop)
-   
-    """
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
+
     course = db.query(Course).filter(Course.id == course_id).first()
     if not user.is_admin() and course.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     id_map = {item.id: item.order_index for item in items}
     for tc in topic.contents:
         if tc.id in id_map:
             tc.order_index = id_map[tc.id]
+
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=course.slug)
     return SuccessResponse(message="Content reordered")
 
+
+# ── Assessments ───────────────────────────────────────────────────────────────
 
 @router.get("/{course_id}/lessons/{lesson_id}/assessments")
 async def get_lesson_assessments(
@@ -1275,24 +383,25 @@ async def get_lesson_assessments(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """ 
-        GET /courses/{course_id}/lessons/{lesson_id}/assessments
-        — List assessments for a lesson (with student submission status)
-   
-    """
+    """List assessments for a lesson with this user's latest submission status."""
     from app.models import Assessment, AssessmentSubmission
+
     assessments = db.query(Assessment).filter(
         Assessment.course_id == course_id,
         Assessment.lesson_id == lesson_id,
     ).all()
-    
+
     result = []
     for a in assessments:
-        sub = db.query(AssessmentSubmission).filter(
-            AssessmentSubmission.assessment_id == a.id,
-            AssessmentSubmission.user_id == user.id,
-        ).order_by(AssessmentSubmission.attempt_number.desc()).first()
-
+        sub = (
+            db.query(AssessmentSubmission)
+            .filter(
+                AssessmentSubmission.assessment_id == a.id,
+                AssessmentSubmission.user_id == user.id,
+            )
+            .order_by(AssessmentSubmission.attempt_number.desc())
+            .first()
+        )
         result.append({
             "id": a.id,
             "title": a.title,
@@ -1317,133 +426,7 @@ async def get_lesson_assessments(
     return result
 
 
-
-# ─────────────────────────────────────────────
-#  Upload thumbnail — returns absolute URL
-# ─────────────────────────────────────────────
-
-@router.post("/{course_id}/upload-thumbnail")
-async def upload_thumbnail(
-    course_id: int,
-    file: UploadFile = File(...),
-    user: User = Depends(get_current_verified_user),
-    db: Session = Depends(get_db),
-):
-    course = db.query(Course).filter(Course.id == course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "thumbnails",
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext      = file.filename.rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    content  = await file.read()
-
-    with open(os.path.join(upload_dir, filename), "wb") as f:
-        f.write(content)
-
-    course.thumbnail = filename
-    db.commit()
-
-    return {
-        "thumbnail": filename,
-        # Always return the fully-qualified absolute URL
-        "url": _absolute_url(filename, "courses/thumbnails"),
-    }
-
-
-# ─────────────────────────────────────────────
-#  Upload topic content — returns token URL (not raw path)
-# ─────────────────────────────────────────────
-
-@router.post("/{course_id}/topics/{topic_id}/upload-content")
-async def upload_topic_content(
-    course_id: int,
-    topic_id: int,
-    file: UploadFile = File(...),
-    content_type_hint: Optional[str] = Query(None),
-    user: User = Depends(get_current_verified_user),
-    db: Session = Depends(get_db),
-):
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
-    if not topic:
-        raise HTTPException(status_code=404, detail="Topic not found")
-
-    course = topic.course
-    if course.creator_id != user.id and not user.is_admin():
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    if file.content_type not in ALLOWED_MEDIA:
-        raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
-
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "content",
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext      = file.filename.rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    content  = await file.read()
-
-    max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(status_code=400, detail="File too large")
-
-    with open(os.path.join(upload_dir, filename), "wb") as f:
-        f.write(content)
-
-    mime = file.content_type
-    if   "video"       in mime: ct = CT.video
-    elif "pdf"         in mime: ct = CT.pdf
-    elif "image"       in mime: ct = CT.image
-    elif "powerpoint"  in mime or "presentation" in mime: ct = CT.ppt
-    elif "audio"       in mime: ct = CT.audio
-    else:                       ct = CT.doc
-
-    tc = TopicContent(
-        title=file.filename, content_type=ct,
-        file_path=filename, mime_type=mime,
-        file_size_bytes=len(content),
-        topic_id=topic_id,
-        order_index=len(topic.contents),
-    )
-    db.add(tc)
-    db.commit()
-    db.refresh(tc)
-
-    return {
-        "id": tc.id,
-        "title": file.filename,
-        "content_type": ct,
-        # Never return the real file path.  Return a signed token URL instead.
-        "url": _make_content_token_url(tc, user.id),
-        "mime_type": mime,
-        "order_index": tc.order_index,
-    }
-
-
-# ─────────────────────────────────────────────
-#  The rest of your existing routes remain unchanged below.
-#  (list_courses, get_course, create_course, update_course,
-#   submit_for_approval, approve_course, delete_course,
-#   create_lesson, update_lesson, delete_lesson,
-#   create_topic, update_topic, delete_topic,
-#   delete_topic_content, submit_feedback, etc.)
-# ─────────────────────────────────────────────
-# v2(UPDATES) ==========================
-
-# # ─────────────────────────────────────────────
-#  PUBLIC BROWSE
-# ─────────────────────────────────────────────
+# ── PUBLIC BROWSE ─────────────────────────────────────────────────────────────
 
 @router.get("/")
 async def list_courses(
@@ -1460,6 +443,30 @@ async def list_courses(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(optional_user),
 ):
+    """
+    Public course listing with filtering, pagination, and sorting.
+
+    Cache strategy:
+      - Anonymous requests are cached for 5 minutes, keyed on all query params.
+        All filter combinations are independently cached — a search for "python"
+        is a different key from no search.
+      - Authenticated requests are never cached because _course_dict includes
+        per-user is_enrolled and progress_pct, which differ between users.
+      - Invalidated by: course publish, update, approve, delete, create.
+    """
+    # ── Cache check (anonymous only) ──────────────────────────────
+    cache_key: Optional[str] = None
+    if current_user is None:
+        cache_key = cache.make_key(
+            "courses:list",
+            page, per_page, search, category, level,
+            payment_type, featured, status, creator_id, sort,
+        )
+        hit = cache.get(cache_key)
+        if hit is not None:
+            return hit
+
+    # ── Build filtered query ──────────────────────────────────────
     def _apply_filters(q):
         if status:
             q = q.filter(Course.status == status)
@@ -1502,18 +509,23 @@ async def list_courses(
             q = q.filter(Course.creator_id == creator_id)
         return q
 
-    # ── Count ──
+    # ── Count ─────────────────────────────────────────────────────
     count_q = _apply_filters(db.query(Course.id))
     if sort == "rating":
         count_q = count_q.outerjoin(Course.feedbacks).group_by(Course.id)
     total = count_q.count()
 
     if total == 0:
-        return {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
+        empty = {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
+        if cache_key:
+            cache.set(cache_key, empty, ttl=300)
+        return empty
 
-    # ── Paginate ──
+    # ── Paginate ──────────────────────────────────────────────────
     if sort == "popular":
-        page_q = _apply_filters(db.query(Course.id, Course.views)).order_by(Course.views.desc(), Course.id)
+        page_q = _apply_filters(
+            db.query(Course.id, Course.views)
+        ).order_by(Course.views.desc(), Course.id)
     elif sort == "rating":
         avg_rating = func.coalesce(func.avg(Feedback.rating), 0).label("avg_rating")
         page_q = (
@@ -1523,15 +535,24 @@ async def list_courses(
             .order_by(avg_rating.desc(), Course.id)
         )
     else:
-        page_q = _apply_filters(db.query(Course.id, Course.created_at)).order_by(Course.created_at.desc(), Course.id)
+        page_q = _apply_filters(
+            db.query(Course.id, Course.created_at)
+        ).order_by(Course.created_at.desc(), Course.id)
 
     rows = page_q.offset((page - 1) * per_page).limit(per_page).all()
     matching_ids = [r[0] for r in rows]
 
     if not matching_ids:
-        return {"items": [], "total": total, "page": page, "per_page": per_page,
-                "pages": (total + per_page - 1) // per_page}
+        partial = {
+            "items": [], "total": total, "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page,
+        }
+        if cache_key:
+            cache.set(cache_key, partial, ttl=300)
+        return partial
 
+    # ── Fetch full objects (all relations in one query) ───────────
     order_map = case({id_: idx for idx, id_ in enumerate(matching_ids)}, value=Course.id)
     courses = (
         db.query(Course)
@@ -1547,137 +568,59 @@ async def list_courses(
         .all()
     )
 
-    return {
+    response = {
         "items": [_course_dict(c, current_user) for c in courses],
-        "total": total, "page": page, "per_page": per_page,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
         "pages": (total + per_page - 1) // per_page,
     }
+
+    # ── Store anonymous response in cache ─────────────────────────
+    if cache_key:
+        cache.set(cache_key, _to_cacheable(response), ttl=300)
+
+    return response
 
 
 @router.get("/meta/categories")
 async def list_categories(db: Session = Depends(get_db)):
+    """
+    Active categories used to populate the browse filter.
+
+    Cached for 30 minutes — categories change only on admin write.
+    Invalidated by: admin category create/update/delete (in categories.py).
+    """
+    hit = cache.get("meta:categories")
+    if hit is not None:
+        return hit
+
     cats = db.query(Category).filter(Category.is_active == True).all()
-    return [{"id": c.id, "title": c.title, "slug": c.slug, "image": c.image, "icon": c.icon} for c in cats]
+    result = [
+        {"id": c.id, "title": c.title, "slug": c.slug, "image": c.image, "icon": c.icon}
+        for c in cats
+    ]
+    cache.set("meta:categories", result, ttl=1800)
+    return result
 
 
 @router.get("/meta/tags")
 async def list_tags(db: Session = Depends(get_db)):
+    """
+    All active tags.
+
+    Cached for 30 minutes — tags change only on admin write.
+    Invalidated by: admin tag create/delete (in admin.py or categories.py).
+    """
+    hit = cache.get("meta:tags")
+    if hit is not None:
+        return hit
+
     tags = db.query(Tag).filter(Tag.is_active == True).all()
-    return [{"id": t.id, "name": t.name} for t in tags]
+    result = [{"id": t.id, "name": t.name} for t in tags]
+    cache.set("meta:tags", result, ttl=1800)
+    return result
 
-
-# # v2
-# @router.get("/{course_id_or_slug}")
-# async def get_course(
-#     course_id_or_slug: str,
-#     db: Session = Depends(get_db),
-#     current_user: Optional[User] = Depends(optional_user),
-# ):
-#     q = db.query(Course).options(
-#         joinedload(Course.categories), joinedload(Course.tags),
-#         joinedload(Course.creator), joinedload(Course.enrollments),
-#         joinedload(Course.feedbacks),
-#         joinedload(Course.lessons).joinedload(Lesson.topics).joinedload(Topic.contents),
-#         joinedload(Course.tutor_assignments),
-#     )
-#     try:
-#         course = q.filter(Course.id == int(course_id_or_slug)).first()
-#     except ValueError:
-#         course = q.filter(Course.slug == course_id_or_slug).first()
-
-#     if not course:
-#         raise HTTPException(status_code=404, detail="Course not found")
-
-#     course.views += 1
-#     db.commit()
-
-#     # Find the user's enrollment for this course (if logged in)
-#     enrollment = None
-#     if current_user:
-#         enrollment = next(
-#             (e for e in current_user.enrollments if e.course_id == course.id),
-#             None
-#         )
-
-#     # Build a set of completed topic IDs for fast lookup
-#     # The user has topic_progress (Many-to-Many via user_topic_progress association table)
-#     completed_topic_ids = set()
-#     if current_user and hasattr(current_user, 'topic_progress'):
-#         completed_topic_ids = {t.id for t in current_user.topic_progress}
-
-#     d = _course_dict(course, current_user)
-#     d["lessons"] = [
-#         {
-#             "id": l.id,
-#             "title": l.title,
-#             "description": l.description,
-#             "order_index": l.order_index,
-#             "slug": l.slug,
-#             "topics": [
-#                 {
-#                     "id": t.id,
-#                     "title": t.title,
-#                     "order_index": t.order_index,
-#                     "slug": t.slug,
-#                     "duration_minutes": t.duration_minutes,
-#                     "is_free_preview": t.is_free_preview,
-                    
-#                     # Check if this topic is in the user's completed topics set
-#                     "is_completed": t.id in completed_topic_ids if current_user else False,
-                    
-#                     "has_quiz": db.query(Quiz).filter(
-#                         Quiz.topic_id == t.id, Quiz.is_active == True
-#                     ).count() > 0,
-#                     "has_assessment": db.query(LessonAssessment).filter(
-#                         LessonAssessment.lesson_id == t.lesson_id
-#                     ).count() > 0,
-                    
-#                     "contents_count": len(t.contents),
-#                 }
-#                 for t in sorted(l.topics, key=lambda x: x.order_index)
-#             ],
-#         }
-#         for l in sorted(course.lessons, key=lambda x: x.order_index)
-#     ]
-#     d["feedbacks"] = [
-#         {
-#             "id": f.id,
-#             "rating": f.rating,
-#             "comment": f.comment,
-#             "author": _mini_user(f.author) if f.author else None,
-#             "created_at": f.created_at,
-#         }
-#         for f in course.feedbacks
-#     ]
-#     d["tutors"] = [_mini_user(a.tutor) for a in course.tutor_assignments if a.tutor]
-#     return d
-
-# v3
-"""
-Corrected get_course route.
-
-Problems fixed
---------------
-1. N+1 queries — Quiz and LessonAssessment presence were queried once
-   per topic inside a list comprehension (O(n) DB hits).  Replaced with
-   two bulk queries that build lookup sets before the comprehension runs.
-
-2. Redundant enrollment lookup — _course_dict already receives
-   current_user and derives enrollment internally.  The duplicate inline
-   lookup has been removed; we query enrollment once and reuse it.
-
-3. completed_topic_ids — derived from the enrollment's related topic
-   progress when available, falling back to the user's topic_progress
-   attribute.  Either way it is built before the comprehension.
-
-4. Eager-loading strategy — Quiz and LessonAssessment are NOT added to
-   the joinedload chain (they live in a separate model file and would
-   bloat the Course query).  The two bulk set-queries are cheap
-   (single IN clause each) and issued after the course is loaded.
-
-5. Sorting — sorted() called once per lesson/topic list, not inline
-   inside a nested comprehension.
-"""
 
 @router.get("/{course_id_or_slug}")
 async def get_course(
@@ -1685,7 +628,66 @@ async def get_course(
     db: Session = Depends(get_db),
     current_user: Optional[User] = Depends(optional_user),
 ):
-    # ── 1. Load course with all needed relations in one query ──────
+    """
+    Full course detail including lessons, topics, feedbacks, and tutors.
+
+    Cache strategy — two-layer approach:
+      Layer 1 (cached, TTL 10 min): the anonymous course structure.
+        Contains all structural data: lessons, topics, contents_count, quiz/assessment
+        flags, feedbacks, tutors, creator. User-specific fields default to False/0.
+        Keyed by course_id_or_slug so both /courses/42 and /courses/python-101
+        hit the same cached struct if the slug matches the ID lookup.
+
+      Layer 2 (always live): user-specific overlay.
+        When a user is authenticated, we fetch their enrollment (1 query) and
+        derive their completed topic IDs from the already-loaded topic_progress
+        relation. These are overlaid onto a deep copy of the cached struct —
+        no second full course load needed.
+
+    View count:
+      On cache hit: a lightweight single-column UPDATE by ID (no full load).
+      On cache miss: incremented directly on the loaded ORM object.
+
+    Invalidated by: course update, approve, thumbnail upload, lesson/topic reorder,
+                    lesson/topic CRUD, text content add/edit, feedback submit.
+    """
+    struct_key = f"courses:detail:{course_id_or_slug}"
+    course_struct = cache.get(struct_key)
+
+    if course_struct is not None:
+        # ── Cache hit ─────────────────────────────────────────────
+        # Increment view count with a lightweight targeted UPDATE.
+        try:
+            db.query(Course).filter(
+                Course.id == course_struct["id"]
+            ).update({"views": Course.views + 1}, synchronize_session=False)
+            db.commit()
+        except Exception as exc:
+            logger.warning("View count increment failed on cache hit: %s", exc)
+
+        if current_user is None:
+            return course_struct
+
+        # Overlay user-specific data without reloading the full course
+        result = copy.deepcopy(course_struct)
+
+        enrollment = db.query(Enrollment).filter(
+            Enrollment.user_id == current_user.id,
+            Enrollment.course_id == course_struct["id"],
+        ).first()
+        result["is_enrolled"] = enrollment is not None
+        result["progress_pct"] = enrollment.progress_pct if enrollment else 0.0
+
+        # completed_topic_ids from the user's already-loaded topic_progress relation
+        if hasattr(current_user, "topic_progress") and current_user.topic_progress:
+            completed_ids = {t.id for t in current_user.topic_progress}
+            for lesson in result["lessons"]:
+                for topic in lesson["topics"]:
+                    topic["is_completed"] = topic["id"] in completed_ids
+
+        return result
+
+    # ── Cache miss: full load ─────────────────────────────────────
     base_q = db.query(Course).options(
         joinedload(Course.categories),
         joinedload(Course.tags),
@@ -1707,37 +709,12 @@ async def get_course(
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
 
-    # Increment view count — fire and forget; no need to re-fetch
     course.views += 1
     db.commit()
 
-    # ── 2. Derive enrollment and completed topics once ─────────────
-    completed_topic_ids: set[int] = set()
-
-    if current_user:
-
-        if hasattr(current_user, "topic_progress") and current_user.topic_progress:
-            course_topic_ids = {
-                t.id
-                for lesson in course.lessons
-                for t in lesson.topics
-            }
-            completed_topic_ids = {
-                t.id
-                for t in current_user.topic_progress
-                if t.id in course_topic_ids
-            }
-
-    # ── 3. Bulk-fetch quiz / assessment presence ───────────────────
-    #    Collect all topic IDs and lesson IDs from the loaded course;
-    #    issue one query each — no per-topic DB round-trips.
-
-    all_topic_ids: list[int] = [
-        t.id
-        for l in course.lessons
-        for t in l.topics
-    ]
-    all_lesson_ids: list[int] = [l.id for l in course.lessons]
+    # ── Bulk quiz / assessment presence (avoids N+1 per topic) ────
+    all_topic_ids = [t.id for l in course.lessons for t in l.topics]
+    all_lesson_ids = [l.id for l in course.lessons]
 
     topic_ids_with_quiz: set[int] = set()
     if all_topic_ids:
@@ -1760,29 +737,28 @@ async def get_course(
             .all()
         }
 
-    # ── 4. Build response dict ─────────────────────────────────────
-    d = _course_dict(course, current_user)
+    # ── Build anonymous struct (user=None → is_enrolled=False, progress=0) ──
+    d = _course_dict(course, user=None)
 
     d["lessons"] = [
         {
-            "id":          lesson.id,
-            "title":       lesson.title,
+            "id": lesson.id,
+            "title": lesson.title,
             "description": lesson.description,
             "order_index": lesson.order_index,
-            "slug":        lesson.slug,
-            "has_assessment":   lesson.id in lesson_ids_with_assessment,
-            # Pre-sorted to avoid repeated sort calls inside the comprehension
+            "slug": lesson.slug,
+            "has_assessment": lesson.id in lesson_ids_with_assessment,
             "topics": [
                 {
-                    "id":               topic.id,
-                    "title":            topic.title,
-                    "order_index":      topic.order_index,
-                    "slug":             topic.slug,
+                    "id": topic.id,
+                    "title": topic.title,
+                    "order_index": topic.order_index,
+                    "slug": topic.slug,
                     "duration_minutes": topic.duration_minutes,
-                    "is_free_preview":  topic.is_free_preview,
-                    "is_completed":     topic.id in completed_topic_ids,
-                    "has_quiz":         topic.id in topic_ids_with_quiz,
-                    "contents_count":   len(topic.contents),
+                    "is_free_preview": topic.is_free_preview,
+                    "is_completed": False,          # always False in cached struct
+                    "has_quiz": topic.id in topic_ids_with_quiz,
+                    "contents_count": len(topic.contents),
                 }
                 for topic in sorted(lesson.topics, key=lambda t: t.order_index)
             ],
@@ -1792,10 +768,10 @@ async def get_course(
 
     d["feedbacks"] = [
         {
-            "id":         fb.id,
-            "rating":     fb.rating,
-            "comment":    fb.comment,
-            "author":     _mini_user(fb.author) if fb.author else None,
+            "id": fb.id,
+            "rating": fb.rating,
+            "comment": fb.comment,
+            "author": _mini_user(fb.author) if fb.author else None,
             "created_at": fb.created_at,
         }
         for fb in course.feedbacks
@@ -1806,14 +782,39 @@ async def get_course(
         for a in course.tutor_assignments
         if a.tutor
     ]
-    
 
-    return d
+    # ── Cache the anonymous struct ────────────────────────────────
+    # _to_cacheable() converts datetimes/enums to strings so json.dumps
+    # in RedisService doesn't raise on serialisation.
+    cache.set(struct_key, _to_cacheable(d), ttl=600)
+
+    if current_user is None:
+        return d
+
+    # ── Overlay user-specific data (authenticated path) ───────────
+    result = copy.deepcopy(d)
+
+    enrollment = next(
+        (e for e in course.enrollments if e.user_id == current_user.id), None
+    )
+    result["is_enrolled"] = enrollment is not None
+    result["progress_pct"] = enrollment.progress_pct if enrollment else 0.0
+
+    completed_topic_ids: set[int] = set()
+    if hasattr(current_user, "topic_progress") and current_user.topic_progress:
+        course_topic_ids = {t.id for l in course.lessons for t in l.topics}
+        completed_topic_ids = {
+            t.id for t in current_user.topic_progress if t.id in course_topic_ids
+        }
+
+    for lesson in result["lessons"]:
+        for topic in lesson["topics"]:
+            topic["is_completed"] = topic["id"] in completed_topic_ids
+
+    return result
 
 
-# ─────────────────────────────────────────────
-#  CREATOR / ADMIN COURSE MANAGEMENT
-# ─────────────────────────────────────────────
+# ── CREATOR / ADMIN COURSE MANAGEMENT ────────────────────────────────────────
 
 @router.post("/", status_code=201)
 async def create_course(
@@ -1839,63 +840,23 @@ async def create_course(
         monthly_topic_limit=payload.monthly_topic_limit,
     )
     if payload.category_ids:
-        course.categories = db.query(Category).filter(Category.id.in_(payload.category_ids)).all()
+        course.categories = db.query(Category).filter(
+            Category.id.in_(payload.category_ids)
+        ).all()
     if payload.tag_ids:
         course.tags = db.query(Tag).filter(Tag.id.in_(payload.tag_ids)).all()
+
     db.add(course)
     db.commit()
     db.refresh(course)
+
+    # New course may appear in listing once published — bust listing cache now
+    # so any pre-existing cached empty results don't persist.
+    cache.invalidate("courses:list")
+
     return _course_dict(course, user)
 
 
-# @router.put("/{course_id}")
-# async def update_course(
-#     course_id: int,
-#     payload: CourseUpdate,
-#     user: User = Depends(get_current_verified_user),
-#     db: Session = Depends(get_db),
-# ):
-#     course = db.query(Course).filter(Course.id == course_id).first()
-#     if not course:
-#         raise HTTPException(status_code=404, detail="Course not found")
-#     if not user.is_admin() and course.creator_id != user.id:
-#         raise HTTPException(status_code=403, detail="Not your course")
-
-#     # Apply all scalar fields — exclude relationship fields and status (handled below)
-#     updatable = payload.model_dump(
-#         exclude_none=True,
-#         exclude={"category_ids", "tag_ids", "status"},
-#     )
-#     for field, val in updatable.items():
-#         setattr(course, field, val)
-
-#     if payload.title:
-#         course.slug = _make_slug(payload.title, db, exclude_id=course_id)
-
-#     if payload.category_ids is not None:
-#         course.categories = db.query(Category).filter(Category.id.in_(payload.category_ids)).all()
-
-#     if payload.tag_ids is not None:
-#         course.tags = db.query(Tag).filter(Tag.id.in_(payload.tag_ids)).all()
-
-#     # Status transitions:
-#     # - Admins can set any status freely.
-#     # - Creators can only move to 'pending' (submit for review).
-#     # - Post-approval pricing/detail updates are allowed without changing status;
-#     #   the old code unconditionally reset status to 'pending' which blocked
-#     #   approved courses from being updated in-place.
-#     if payload.status is not None:
-#         if user.is_admin():
-#             course.status = payload.status
-#         elif payload.status == CourseStatus.pending:
-#             course.status = CourseStatus.pending
-#         # Any other status change by a non-admin is silently ignored
-
-#     db.commit()
-#     db.refresh(course)
-#     return _course_dict(course, user)
-
-# v2
 @router.put("/{course_id}")
 async def update_course(
     course_id: int,
@@ -1904,89 +865,58 @@ async def update_course(
     db: Session = Depends(get_db),
 ):
     course = db.query(Course).filter(Course.id == course_id).first()
-
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
-
     if not user.is_admin() and course.creator_id != user.id:
         raise HTTPException(status_code=403, detail="Not your course")
 
-    # ─────────────────────────────────────────────
-    # 1. Extract payload safely
-    # ─────────────────────────────────────────────
     update_data = payload.model_dump(
         exclude_none=True,
         exclude={"category_ids", "tag_ids", "status"},
     )
 
-    # ─────────────────────────────────────────────
-    # 2. Apply scalar fields
-    # ─────────────────────────────────────────────
     for field, val in update_data.items():
         setattr(course, field, val)
 
-    # ─────────────────────────────────────────────
-    # 3. Title → slug sync
-    # ─────────────────────────────────────────────
     if "title" in update_data:
         course.slug = _make_slug(payload.title, db, exclude_id=course_id)
 
-    # ─────────────────────────────────────────────
-    # 4. Relationships
-    # ─────────────────────────────────────────────
     if payload.category_ids is not None:
-        course.categories = (
-            db.query(Category)
-            .filter(Category.id.in_(payload.category_ids))
-            .all()
-        )
+        course.categories = db.query(Category).filter(
+            Category.id.in_(payload.category_ids)
+        ).all()
 
     if payload.tag_ids is not None:
-        course.tags = (
-            db.query(Tag)
-            .filter(Tag.id.in_(payload.tag_ids))
-            .all()
-        )
+        course.tags = db.query(Tag).filter(Tag.id.in_(payload.tag_ids)).all()
 
-    # ─────────────────────────────────────────────
-    # 5. Status rules
-    # ─────────────────────────────────────────────
     if payload.status is not None:
         if user.is_admin():
             course.status = payload.status
         elif payload.status == CourseStatus.pending:
             course.status = CourseStatus.pending
-        # non-admin invalid transitions ignored intentionally
 
-    # ─────────────────────────────────────────────
-    # 6. AUTO-DERIVE FLAGS (IMPORTANT FIX)
-    # ─────────────────────────────────────────────
-
+    # Auto-derive feature flags from fee columns
     if "subscription_fee" in update_data and "subscription_enabled" not in update_data:
-        course.subscription_enabled = (
-            course.subscription_fee is not None
-            and float(course.subscription_fee) > 0
+        course.subscription_enabled = bool(
+            course.subscription_fee and float(course.subscription_fee) > 0
         )
-
     if "pay_as_you_go_fee" in update_data and "pay_as_you_go_enabled" not in update_data:
-        course.pay_as_you_go_enabled = (
-            course.pay_as_you_go_fee is not None
-            and float(course.pay_as_you_go_fee) > 0
+        course.pay_as_you_go_enabled = bool(
+            course.pay_as_you_go_fee and float(course.pay_as_you_go_fee) > 0
         )
-
     if "installment_fee" in update_data and "installment_enabled" not in update_data:
-        course.installment_enabled = (
-            course.installment_fee is not None
+        course.installment_enabled = bool(
+            course.installment_fee
             and float(course.installment_fee) > 0
-            and course.installment_count is not None
+            and course.installment_count
             and int(course.installment_count) > 1
         )
 
-    # ─────────────────────────────────────────────
-    # 7. Commit
-    # ─────────────────────────────────────────────
     db.commit()
     db.refresh(course)
+
+    # Invalidate both the detail cache (by ID and slug) and all listing caches
+    _invalidate_course_caches(course_id, slug=course.slug)
 
     return _course_dict(course, user)
 
@@ -2002,8 +932,12 @@ async def submit_for_approval(
         raise HTTPException(status_code=404, detail="Course not found")
     if course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Not your course")
+
     course.status = CourseStatus.pending
     db.commit()
+
+    # Status change affects listing (pending filter) and detail badge
+    _invalidate_course_caches(course_id, slug=course.slug)
     return SuccessResponse(message="Course submitted for admin approval")
 
 
@@ -2016,6 +950,7 @@ async def approve_course(
     db: Session = Depends(get_db),
 ):
     from datetime import datetime, timezone
+
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -2041,8 +976,15 @@ async def approve_course(
                 course.creator.email, course.creator.name,
                 course.title, payload.rejection_reason or "",
             )
+
     db.commit()
-    return SuccessResponse(message=f"Course {'approved' if payload.approved else 'rejected'} successfully")
+
+    # Approval changes status and approved_at — both cached; invalidate both
+    _invalidate_course_caches(course_id, slug=course.slug)
+
+    return SuccessResponse(
+        message=f"Course {'approved' if payload.approved else 'rejected'} successfully"
+    )
 
 
 @router.delete("/{course_id}", dependencies=[Depends(require_admin)])
@@ -2050,15 +992,16 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)):
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
+
     course.is_deleted = True
     course.is_active = False
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=course.slug)
     return SuccessResponse(message="Course deleted")
 
 
-# ─────────────────────────────────────────────
-#  MEDIA UPLOAD
-# ─────────────────────────────────────────────
+# ── MEDIA UPLOAD ──────────────────────────────────────────────────────────────
 
 @router.post("/{course_id}/upload-thumbnail")
 async def upload_thumbnail(
@@ -2080,20 +1023,30 @@ async def upload_thumbnail(
     )
     os.makedirs(upload_dir, exist_ok=True)
 
-    ext      = file.filename.rsplit(".", 1)[-1].lower()
+    ext = file.filename.rsplit(".", 1)[-1].lower()
     filename = f"{uuid.uuid4().hex}.{ext}"
-    content  = await file.read()
+    content = await file.read()
 
-    with open(os.path.join(upload_dir, filename), "wb") as f:
-        f.write(content)
+    with open(os.path.join(upload_dir, filename), "wb") as fh:
+        fh.write(content)
+
+    # Remove old file (non-fatal)
+    if course.thumbnail and not course.thumbnail.startswith("http"):
+        old_path = os.path.join(upload_dir, course.thumbnail)
+        try:
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+        except OSError:
+            pass
 
     course.thumbnail = filename
     db.commit()
 
+    # Thumbnail URL is part of the cached course struct
+    _invalidate_course_caches(course_id, slug=course.slug)
+
     return {
         "thumbnail": filename,
-        # Return the fully-qualified URL immediately so the frontend
-        # can display the preview without a second resolution step.
         "url": _absolute_url(filename, "courses/thumbnails"),
     }
 
@@ -2107,7 +1060,9 @@ async def upload_topic_content(
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
 
@@ -2116,7 +1071,9 @@ async def upload_topic_content(
         raise HTTPException(status_code=403, detail="Access denied")
 
     if file.content_type not in ALLOWED_MEDIA:
-        raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
+        raise HTTPException(
+            status_code=400, detail=f"File type not allowed: {file.content_type}"
+        )
 
     cfg = get_app_config()
     upload_dir = os.path.join(
@@ -2125,44 +1082,47 @@ async def upload_topic_content(
     )
     os.makedirs(upload_dir, exist_ok=True)
 
-    ext      = file.filename.rsplit(".", 1)[-1].lower()
+    ext = file.filename.rsplit(".", 1)[-1].lower()
     filename = f"{uuid.uuid4().hex}.{ext}"
-    content  = await file.read()
+    content = await file.read()
 
     max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise HTTPException(status_code=400, detail="File too large")
 
-    with open(os.path.join(upload_dir, filename), "wb") as f:
-        f.write(content)
+    with open(os.path.join(upload_dir, filename), "wb") as fh:
+        fh.write(content)
 
     mime = file.content_type
-    from app.models.courses import ContentType as CT
-    if   "video"       in mime: ct = CT.video
-    elif "pdf"         in mime: ct = CT.pdf
-    elif "image"       in mime: ct = CT.image
-    elif "powerpoint"  in mime or "presentation" in mime: ct = CT.ppt
-    elif "audio"       in mime: ct = CT.audio
-    else:                       ct = CT.doc
+    from app.models.courses import ContentType as CT_model
+    if "video" in mime:        ct = CT_model.video
+    elif "pdf" in mime:        ct = CT_model.pdf
+    elif "image" in mime:      ct = CT_model.image
+    elif "powerpoint" in mime or "presentation" in mime: ct = CT_model.ppt
+    elif "audio" in mime:      ct = CT_model.audio
+    else:                      ct = CT_model.doc
 
-    topic_content = TopicContent(
+    tc = TopicContent(
         title=file.filename, content_type=ct,
         file_path=filename, mime_type=mime,
         file_size_bytes=len(content),
         topic_id=topic_id,
         order_index=len(topic.contents),
     )
-    db.add(topic_content)
+    db.add(tc)
     db.commit()
-    db.refresh(topic_content)
+    db.refresh(tc)
+
+    # New content item changes contents_count in the cached struct
+    _invalidate_course_caches(course_id, slug=course.slug)
 
     return {
-        "id": topic_content.id,
+        "id": tc.id,
         "title": file.filename,
         "content_type": ct,
-        "file_path": filename,
-        "url": _absolute_url(filename, "courses/content"),
+        "url": _make_content_token_url(tc, user.id),
         "mime_type": mime,
+        "order_index": tc.order_index,
     }
 
 
@@ -2174,7 +1134,7 @@ async def delete_topic_content(
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    """Delete a single content file from a topic."""
+    """Delete a single content item from a topic."""
     tc = db.query(TopicContent).filter(
         TopicContent.id == content_id,
         TopicContent.topic_id == topic_id,
@@ -2182,14 +1142,15 @@ async def delete_topic_content(
     if not tc:
         raise HTTPException(status_code=404, detail="Content not found")
 
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
 
     if topic.course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
 
-    # Remove physical file
     if tc.file_path:
         cfg = get_app_config()
         full_path = os.path.join(
@@ -2201,12 +1162,12 @@ async def delete_topic_content(
 
     db.delete(tc)
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=topic.course.slug)
     return SuccessResponse(message="Content deleted")
 
 
-# ─────────────────────────────────────────────
-#  LESSONS
-# ─────────────────────────────────────────────
+# ── LESSONS ───────────────────────────────────────────────────────────────────
 
 @router.post("/{course_id}/lessons", status_code=201)
 async def create_lesson(
@@ -2229,46 +1190,62 @@ async def create_lesson(
     db.add(lesson)
     db.commit()
     db.refresh(lesson)
-    return {"id": lesson.id, "title": lesson.title, "order_index": lesson.order_index, "topics": []}
+
+    _invalidate_course_caches(course_id, slug=course.slug)
+    return {
+        "id": lesson.id, "title": lesson.title,
+        "order_index": lesson.order_index, "topics": [],
+    }
 
 
 @router.put("/{course_id}/lessons/{lesson_id}")
 async def update_lesson(
-    course_id: int, lesson_id: int,
+    course_id: int,
+    lesson_id: int,
     payload: LessonUpdate,
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    lesson = db.query(Lesson).filter(Lesson.id == lesson_id, Lesson.course_id == course_id).first()
+    lesson = db.query(Lesson).filter(
+        Lesson.id == lesson_id, Lesson.course_id == course_id,
+    ).first()
     if not lesson:
         raise HTTPException(status_code=404, detail="Lesson not found")
     if lesson.course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
+
     for k, v in payload.model_dump(exclude_none=True).items():
         setattr(lesson, k, v)
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=lesson.course.slug)
     return {"id": lesson.id, "title": lesson.title}
 
 
 @router.delete("/{course_id}/lessons/{lesson_id}")
 async def delete_lesson(
-    course_id: int, lesson_id: int,
+    course_id: int,
+    lesson_id: int,
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    lesson = db.query(Lesson).filter(Lesson.id == lesson_id, Lesson.course_id == course_id).first()
+    lesson = db.query(Lesson).filter(
+        Lesson.id == lesson_id, Lesson.course_id == course_id,
+    ).first()
     if not lesson:
         raise HTTPException(status_code=404, detail="Lesson not found")
     if lesson.course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
+
+    slug = lesson.course.slug
     db.delete(lesson)
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=slug)
     return SuccessResponse(message="Lesson deleted")
 
 
-# ─────────────────────────────────────────────
-#  TOPICS
-# ─────────────────────────────────────────────
+# ── TOPICS ────────────────────────────────────────────────────────────────────
 
 @router.post("/{course_id}/topics", status_code=201)
 async def create_topic(
@@ -2278,8 +1255,7 @@ async def create_topic(
     db: Session = Depends(get_db),
 ):
     lesson = db.query(Lesson).filter(
-        Lesson.id == payload.lesson_id,
-        Lesson.course_id == course_id,
+        Lesson.id == payload.lesson_id, Lesson.course_id == course_id,
     ).first()
     if not lesson:
         raise HTTPException(status_code=404, detail="Lesson not found")
@@ -2296,80 +1272,64 @@ async def create_topic(
     db.add(topic)
     db.commit()
     db.refresh(topic)
-    return {"id": topic.id, "title": topic.title, "order_index": topic.order_index,
-            "is_free_preview": topic.is_free_preview, "duration_minutes": topic.duration_minutes}
+
+    _invalidate_course_caches(course_id, slug=lesson.course.slug)
+    return {
+        "id": topic.id, "title": topic.title,
+        "order_index": topic.order_index,
+        "is_free_preview": topic.is_free_preview,
+        "duration_minutes": topic.duration_minutes,
+    }
 
 
 @router.put("/{course_id}/topics/{topic_id}")
 async def update_topic(
-    course_id: int, topic_id: int,
+    course_id: int,
+    topic_id: int,
     payload: TopicUpdate,
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
     if topic.course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
+
     for k, v in payload.model_dump(exclude_none=True).items():
         setattr(topic, k, v)
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=topic.course.slug)
     return {"id": topic.id, "title": topic.title}
 
 
 @router.delete("/{course_id}/topics/{topic_id}")
 async def delete_topic(
-    course_id: int, topic_id: int,
+    course_id: int,
+    topic_id: int,
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
+    topic = db.query(Topic).filter(
+        Topic.id == topic_id, Topic.course_id == course_id,
+    ).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
     if topic.course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
+
+    slug = topic.course.slug
     db.delete(topic)
     db.commit()
+
+    _invalidate_course_caches(course_id, slug=slug)
     return SuccessResponse(message="Topic deleted")
 
 
-# @router.get("/{course_id}/topics/{topic_id}/content")
-# async def get_topic_content(
-#     course_id: int, topic_id: int,
-#     user: User = Depends(get_current_user),
-#     db: Session = Depends(get_db),
-# ):
-#     topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
-#     if not topic:
-#         raise HTTPException(status_code=404, detail="Topic not found")
-
-#     if not topic.is_free_preview:
-#         enrolled = db.query(Enrollment).filter(
-#             Enrollment.user_id == user.id,
-#             Enrollment.course_id == course_id,
-#         ).first()
-#         if not enrolled and not user.is_admin():
-#             raise HTTPException(status_code=403, detail="You must be enrolled to access this content")
-
-#     return {
-#         "id": topic.id, "title": topic.title, "description": topic.description,
-#         "contents": [
-#             {
-#                 "id": c.id, "title": c.title, "content_type": c.content_type,
-#                 # Always return absolute URL
-#                 "url": c.url or _absolute_url(c.file_path, "courses/content"),
-#                 "body": c.body, "duration_seconds": c.duration_seconds,
-#                 "order_index": c.order_index,
-#             }
-#             for c in sorted(topic.contents, key=lambda x: x.order_index)
-#         ],
-#     }
-
-
-# ─────────────────────────────────────────────
-#  FEEDBACK
-# ─────────────────────────────────────────────
+# ── FEEDBACK ──────────────────────────────────────────────────────────────────
 
 @router.post("/{course_id}/feedback")
 async def submit_feedback(
@@ -2379,22 +1339,34 @@ async def submit_feedback(
     db: Session = Depends(get_db),
 ):
     enrolled = db.query(Enrollment).filter(
-        Enrollment.user_id == user.id, Enrollment.course_id == course_id,
+        Enrollment.user_id == user.id,
+        Enrollment.course_id == course_id,
     ).first()
     if not enrolled:
-        raise HTTPException(status_code=403, detail="You must be enrolled to leave feedback")
+        raise HTTPException(
+            status_code=403, detail="You must be enrolled to leave feedback"
+        )
+
+    course = db.query(Course).filter(Course.id == course_id).first()
 
     existing = db.query(Feedback).filter(
         Feedback.user_id == user.id, Feedback.course_id == course_id,
     ).first()
     if existing:
-        existing.rating  = payload.rating
+        existing.rating = payload.rating
         existing.comment = payload.comment
         db.commit()
+        # Rating changed — cached avg_rating and feedbacks list are stale
+        _invalidate_course_caches(course_id, slug=course.slug if course else None)
         return SuccessResponse(message="Feedback updated")
 
-    db.add(Feedback(rating=payload.rating, comment=payload.comment,
-                    user_id=user.id, course_id=course_id))
+    db.add(Feedback(
+        rating=payload.rating, comment=payload.comment,
+        user_id=user.id, course_id=course_id,
+    ))
     db.commit()
+
+    # New feedback changes feedbacks list and avg_rating in the cached struct
+    _invalidate_course_caches(course_id, slug=course.slug if course else None)
     return SuccessResponse(message="Feedback submitted")
 

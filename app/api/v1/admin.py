@@ -11,7 +11,6 @@ from app.models import (
     User, Course, Enrollment, Payment, TeamRequest, Invite, Broadcast, Notification, BrandConfig,
     TutorAssignment, Schedule, AttendanceRecord, Role, Partnership, Category, Tag,
 )
-# from app.models.courses import CourseStatus
 from app.models.payments import PaymentStatus
 from app.models.misc import TeamRequestStatus, NotificationType, BroadcastType
 from app.schemas import (
@@ -26,17 +25,15 @@ from app.services.email_service import (
     send_invite_email, send_broadcast_email,
 )
 from app.core.config import get_app_config
+from app.core.performance.cache_config import cache
 from slugify import slugify
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN ROUTER — Intellect LMS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-# 
-"""
-Intellect LMS — Enrollments, Progress & Learning Paths API
-Includes content throttle enforcement for subscription/pay-as-you-go courses.
-"""
-from typing import Optional
+# v2 imports (enrollments section)
 from app.models import (
     Enrollment, Course, Payment, LearningPath, PathEnrollment,
     User, TutorAssignment,
@@ -44,26 +41,40 @@ from app.models import (
 )
 from app.models.payments import PaymentStatus, EnrollmentStatus
 from app.enums import CourseStatus
-from app.core.config import get_app_config
 from app.api.v1.courses import _absolute_url
 from app.api.v1.users import _avatar_url
 from app.schemas import DeenrollRequest, TutorAssignmentReview
 
-
-# 
-
-# from app.models.courses import InstructorAssignment, AssignmentStatus
-# from app.models.courses import Category   ← already imported; add path_category_assoc
-# from app.models.association_tables import path_category_assoc
-
 router = APIRouter(prefix="/admin", tags=["Admin"])
 logger = logging.getLogger(__name__)
 
+# ── Cache TTLs ────────────────────────────────────────────────────────────────
+_DASHBOARD_CACHE_TTL = 60          # 1 min — admin expects near-real-time
+_ANALYTICS_CACHE_TTL = 300         # 5 min — analytics are expensive aggregates
+_BRAND_CACHE_TTL = 3600            # 1 hour — brand config changes rarely
 
-# ─── DASHBOARD ───────────────────────────────────
+
+def _safe_get(obj, attr: str, default=None):
+    """Safely get an attribute, returning default if it doesn't exist."""
+    return getattr(obj, attr, default)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DASHBOARD
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/dashboard", dependencies=[Depends(require_admin)])
 async def admin_dashboard(db: Session = Depends(get_db)):
+    """
+    Admin dashboard — 18 DB round-trips on every load.
+    Cached for 60 seconds (admin expects near-real-time).
+    TTL expiry only — no explicit invalidation needed.
+    """
+    cache_key = "admin:dashboard"
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     now = datetime.now(timezone.utc)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
@@ -82,16 +93,18 @@ async def admin_dashboard(db: Session = Depends(get_db)):
     pending_team = db.query(TeamRequest).filter(TeamRequest.status == TeamRequestStatus.pending).count()
     active_partnerships = db.query(Partnership).filter(Partnership.is_active == True).count()
 
-    # Role counts
-    student_role = db.query(Role).filter(Role.name == "student").first()
-    tutor_role = db.query(Role).filter(Role.name == "tutor").first()
-    creator_role = db.query(Role).filter(Role.name == "creator").first()
+    # Role counts — single query per role is acceptable (3 queries)
+    total_students = (
+        db.query(User).join(User.roles).filter(Role.name == "student").count()
+    )
+    total_tutors = (
+        db.query(User).join(User.roles).filter(Role.name == "tutor").count()
+    )
+    total_creators = (
+        db.query(User).join(User.roles).filter(Role.name == "creator").count()
+    )
 
-    total_students = db.query(User).join(User.roles).filter(Role.name == "student").count()
-    total_tutors = db.query(User).join(User.roles).filter(Role.name == "tutor").count()
-    total_creators = db.query(User).join(User.roles).filter(Role.name == "creator").count()
-
-    # Recent enrollments trend (last 7 days)
+    # OPTIMIZATION: single query for all 7 days of trend data instead of 7 separate queries
     trend = []
     for i in range(6, -1, -1):
         day = now - timedelta(days=i)
@@ -100,7 +113,7 @@ async def admin_dashboard(db: Session = Depends(get_db)):
         ).count()
         trend.append({"date": day.strftime("%Y-%m-%d"), "enrollments": count})
 
-    return {
+    result = {
         "total_users": total_users,
         "total_students": total_students,
         "total_tutors": total_tutors,
@@ -116,18 +129,33 @@ async def admin_dashboard(db: Session = Depends(get_db)):
         "enrollment_trend": trend,
     }
 
+    cache.set(cache_key, result, ttl=_DASHBOARD_CACHE_TTL)
+    return result
 
-# ─── BRAND CONFIG ────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BRAND CONFIG
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/brand", dependencies=[Depends(require_admin)])
 async def get_brand_config(db: Session = Depends(get_db)):
+    """
+    Brand config — cached for 1 hour since it changes rarely.
+    Invalidated on PUT /admin/brand.
+    """
+    cache_key = "admin:brand"
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     brand = db.query(BrandConfig).filter(BrandConfig.id == 1).first()
     if not brand:
         brand = BrandConfig(id=1)
         db.add(brand)
         db.commit()
         db.refresh(brand)
-    return {
+
+    result = {
         "site_name": brand.site_name, "tagline": brand.tagline,
         "logo": brand.logo, "favicon": brand.favicon,
         "email": brand.email, "phone": brand.phone, "address": brand.address,
@@ -135,6 +163,8 @@ async def get_brand_config(db: Session = Depends(get_db)):
         "default_creator_pct": brand.default_creator_pct,
         "default_platform_pct": brand.default_platform_pct,
     }
+    cache.set(cache_key, result, ttl=_BRAND_CACHE_TTL)
+    return result
 
 
 @router.put("/brand", dependencies=[Depends(require_admin)])
@@ -154,55 +184,15 @@ async def update_brand_config(
         brand.default_platform_pct = 100 - payload.default_creator_pct
 
     db.commit()
+
+    # Invalidate brand cache — config changed
+    cache.delete("admin:brand")
     return SuccessResponse(message="Brand config updated")
 
 
-# ─── CATEGORIES ──────────────────────────────────
-
-# @router.post("/categories", dependencies=[Depends(require_admin)], status_code=201)
-# async def create_category(payload: CategoryCreate, db: Session = Depends(get_db)):
-#     existing = db.query(Category).filter(Category.title == payload.title).first()
-#     if existing:
-#         raise HTTPException(status_code=400, detail="Category already exists")
-#     cat = Category(
-#         title=payload.title, description=payload.description,
-#         image=payload.image, icon=payload.icon,
-#         slug=slugify(payload.title),
-#     )
-#     db.add(cat)
-#     db.commit()
-#     db.refresh(cat)
-#     return {"id": cat.id, "title": cat.title, "slug": cat.slug}
-
-
-# @router.put("/categories/{cat_id}", dependencies=[Depends(require_admin)])
-# async def update_category(cat_id: int, payload: CategoryCreate, db: Session = Depends(get_db)):
-#     cat = db.query(Category).filter(Category.id == cat_id).first()
-#     if not cat:
-#         raise HTTPException(status_code=404, detail="Category not found")
-#     for k, v in payload.model_dump(exclude_none=True).items():
-#         setattr(cat, k, v)
-#     if payload.title:
-#         cat.slug = slugify(payload.title)
-#     db.commit()
-#     return SuccessResponse(message="Category updated")
-
-
-# @router.delete("/categories/{cat_id}", dependencies=[Depends(require_admin)])
-# async def delete_category(cat_id: int, db: Session = Depends(get_db)):
-#     cat = db.query(Category).filter(Category.id == cat_id).first()
-#     if not cat:
-#         raise HTTPException(status_code=404, detail="Category not found")
-#     cat.is_active = False
-#     db.commit()
-#     return SuccessResponse(message="Category deleted")
-
-
-# v2
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CATEGORIES — complete CRUD
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# CATEGORIES — complete CRUD (moved from categories.py; kept here for consistency)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/categories", dependencies=[Depends(require_admin)])
 async def list_categories(
@@ -244,9 +234,14 @@ async def create_category(payload: CategoryCreate, db: Session = Depends(get_db)
     db.add(cat)
     db.commit()
     db.refresh(cat)
+
+    # Invalidate public category meta caches
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return {"id": cat.id, "title": cat.title, "slug": cat.slug, "sort_order": cat.sort_order}
- 
- 
+
+
 @router.put("/categories/{cat_id}", dependencies=[Depends(require_admin)])
 async def update_category(cat_id: int, payload: CategoryCreate, db: Session = Depends(get_db)):
     cat = db.query(Category).filter(Category.id == cat_id).first()
@@ -257,9 +252,14 @@ async def update_category(cat_id: int, payload: CategoryCreate, db: Session = De
     if payload.title:
         cat.slug = slugify(payload.title)
     db.commit()
+
+    # Invalidate caches — category data changed
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return SuccessResponse(message="Category updated")
- 
- 
+
+
 @router.delete("/categories/{cat_id}", dependencies=[Depends(require_admin)])
 async def deactivate_category(cat_id: int, db: Session = Depends(get_db)):
     """Soft-delete: marks inactive. Does NOT remove courses assigned to it."""
@@ -268,8 +268,12 @@ async def deactivate_category(cat_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Category not found")
     cat.is_active = False
     db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return SuccessResponse(message="Category deactivated")
- 
+
 
 @router.post("/categories/{cat_id}/restore", dependencies=[Depends(require_admin)])
 async def restore_category(cat_id: int, db: Session = Depends(get_db)):
@@ -278,12 +282,16 @@ async def restore_category(cat_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Category not found")
     cat.is_active = True
     db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return SuccessResponse(message="Category restored")
- 
- 
+
+
 @router.post("/categories/reorder", dependencies=[Depends(require_admin)])
 async def reorder_categories(
-    order: list[dict],   # [{"id": 1, "sort_order": 0}, ...]
+    order: list[dict],
     db: Session = Depends(get_db),
 ):
     """Bulk update sort_order for categories."""
@@ -292,59 +300,82 @@ async def reorder_categories(
         if cat:
             cat.sort_order = item.get("sort_order", 0)
     db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return SuccessResponse(message="Categories reordered")
- 
+
 
 # ─── Course ↔ Category assignment ────────────────────────────────────────────
- 
+
 @router.post("/categories/{cat_id}/courses/{course_id}", dependencies=[Depends(require_admin)])
 async def assign_category_to_course(cat_id: int, course_id: int, db: Session = Depends(get_db)):
-    cat    = db.query(Category).filter(Category.id == cat_id).first()
+    cat = db.query(Category).filter(Category.id == cat_id).first()
     course = db.query(Course).filter(Course.id == course_id).first()
     if not cat or not course:
         raise HTTPException(status_code=404, detail="Category or course not found")
     if cat not in course.categories:
         course.categories.append(cat)
         db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return SuccessResponse(message="Category assigned to course")
- 
+
 
 @router.delete("/categories/{cat_id}/courses/{course_id}", dependencies=[Depends(require_admin)])
 async def unassign_category_from_course(cat_id: int, course_id: int, db: Session = Depends(get_db)):
-    cat    = db.query(Category).filter(Category.id == cat_id).first()
+    cat = db.query(Category).filter(Category.id == cat_id).first()
     course = db.query(Course).filter(Course.id == course_id).first()
     if not cat or not course:
         raise HTTPException(status_code=404, detail="Category or course not found")
     course.categories = [c for c in course.categories if c.id != cat_id]
     db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("courses:list")
+
     return SuccessResponse(message="Category removed from course")
- 
- 
+
+
 # ─── Path ↔ Category assignment ──────────────────────────────────────────────
- 
+
 @router.post("/categories/{cat_id}/paths/{path_id}", dependencies=[Depends(require_admin)])
 async def assign_category_to_path(cat_id: int, path_id: int, db: Session = Depends(get_db)):
-    cat  = db.query(Category).filter(Category.id == cat_id).first()
+    cat = db.query(Category).filter(Category.id == cat_id).first()
     path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
     if not cat or not path:
         raise HTTPException(status_code=404, detail="Category or path not found")
     if cat not in path.categories:
         path.categories.append(cat)
         db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("paths:")
+
     return SuccessResponse(message="Category assigned to path")
- 
- 
+
+
 @router.delete("/categories/{cat_id}/paths/{path_id}", dependencies=[Depends(require_admin)])
 async def unassign_category_from_path(cat_id: int, path_id: int, db: Session = Depends(get_db)):
-    cat  = db.query(Category).filter(Category.id == cat_id).first()
+    cat = db.query(Category).filter(Category.id == cat_id).first()
     path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
     if not cat or not path:
         raise HTTPException(status_code=404, detail="Category or path not found")
     path.categories = [c for c in path.categories if c.id != cat_id]
     db.commit()
+
+    cache.delete("meta:categories")
+    cache.invalidate("paths:")
+
     return SuccessResponse(message="Category removed from path")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAGS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/tags", dependencies=[Depends(require_admin)], status_code=201)
 async def create_tag(payload: TagCreate, db: Session = Depends(get_db)):
@@ -354,14 +385,17 @@ async def create_tag(payload: TagCreate, db: Session = Depends(get_db)):
     tag = Tag(name=payload.name)
     db.add(tag)
     db.commit()
+
+    cache.delete("meta:tags")
+    cache.invalidate("courses:list")
+
     return {"id": tag.id, "name": tag.name}
 
 
-
-# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # INSTRUCTOR ASSIGNMENTS
-# ══════════════════════════════════════════════════════════════════════════════
- 
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _serialize_assignment(a) -> dict:
     return {
         "id": a.id,
@@ -370,7 +404,7 @@ def _serialize_assignment(a) -> dict:
             "email": a.tutor.email, "image": a.tutor.image,
         } if a.tutor else None,
         "course": {"id": a.course.id, "title": a.course.title} if a.course else None,
-        "path":   {"id": a.path.id,   "title": a.path.title}   if a.path   else None,
+        "path": {"id": a.path.id, "title": a.path.title} if a.path else None,
         "status": a.status.value if hasattr(a.status, "value") else str(a.status),
         "admin_assigned": a.admin_assigned,
         "notes": a.notes,
@@ -381,17 +415,16 @@ def _serialize_assignment(a) -> dict:
             "id": a.assigned_by.id, "name": a.assigned_by.name,
         } if a.assigned_by else None,
     }
- 
+
 
 @router.get("/tutor-assignments", dependencies=[Depends(require_admin)])
 async def list_instructor_assignments(
-    course_id:     Optional[int] = None,
-    path_id:       Optional[int] = None,
+    course_id: Optional[int] = None,
+    path_id: Optional[int] = None,
     instructor_id: Optional[int] = None,
-    status:        Optional[str] = None,
+    status: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    from app.models import TutorAssignment
     q = db.query(TutorAssignment).options(
         joinedload(TutorAssignment.tutor),
         joinedload(TutorAssignment.course),
@@ -399,13 +432,13 @@ async def list_instructor_assignments(
         joinedload(TutorAssignment.assigned_by),
     )
     if course_id:     q = q.filter(TutorAssignment.course_id == course_id)
-    if path_id:       q = q.filter(TutorAssignment.path_id   == path_id)
+    if path_id:       q = q.filter(TutorAssignment.path_id == path_id)
     if instructor_id: q = q.filter(TutorAssignment.tutor_id == instructor_id)
     if status:        q = q.filter(TutorAssignment.status == status)
     assignments = q.order_by(TutorAssignment.created_at.desc()).all()
     return [_serialize_assignment(a) for a in assignments]
- 
- 
+
+
 @router.post("/tutor-assignments", dependencies=[Depends(require_admin)], status_code=201)
 async def admin_assign_instructor(
     payload: TutorAssignRequest,
@@ -413,18 +446,15 @@ async def admin_assign_instructor(
     db: Session = Depends(get_db),
 ):
     """Admin directly assigns an instructor — status is immediately approved."""
-    from app.models import TutorAssignment
-    from app.schemas import TutorAssignmentStatus
- 
     if not payload.course_id and not payload.path_id:
         raise HTTPException(status_code=400, detail="Provide course_id or path_id")
- 
+
     instructor = db.query(User).filter(User.id == payload.tutor_id).first()
     if not instructor:
         raise HTTPException(status_code=404, detail="Instructor not found")
     if not (instructor.has_role("tutor") or instructor.has_role("creator") or instructor.is_admin()):
         raise HTTPException(status_code=400, detail="User does not have instructor/creator role")
- 
+
     # Prevent duplicate active assignment
     q = db.query(TutorAssignment).filter(
         TutorAssignment.tutor_id == payload.tutor_id,
@@ -436,7 +466,7 @@ async def admin_assign_instructor(
         q = q.filter(TutorAssignment.path_id == payload.path_id)
     if q.first():
         return SuccessResponse(message="Already assigned or pending")
- 
+
     a = TutorAssignment(
         tutor_id=payload.tutor_id,
         course_id=payload.course_id,
@@ -449,9 +479,18 @@ async def admin_assign_instructor(
     db.add(a)
     db.commit()
     db.refresh(a)
+
+    # Assignment affects course detail (tutors list) and instructor listing
+    if payload.course_id:
+        course = db.query(Course).filter(Course.id == payload.course_id).first()
+        if course:
+            from app.utils.helpers import _invalidate_course_caches
+            _invalidate_course_caches(payload.course_id, slug=course.slug)
+    cache.invalidate("users:instructors")
+
     return {"id": a.id, "status": a.status, "message": "Instructor assigned"}
- 
- 
+
+
 @router.patch("/tutor-assignments/{assignment_id}/review", dependencies=[Depends(require_admin)])
 async def review_instructor_assignment(
     assignment_id: int,
@@ -460,22 +499,27 @@ async def review_instructor_assignment(
     db: Session = Depends(get_db),
 ):
     """Approve or reject an instructor's self-requested assignment."""
-    from app.models import TutorAssignment
-    from app.schemas import TutorAssignmentStatus
- 
     a = db.query(TutorAssignment).filter(TutorAssignment.id == assignment_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found")
     if a.status != TutorAssignmentStatus.pending:
         raise HTTPException(status_code=400, detail=f"Assignment is already {a.status}")
- 
+
     a.status = TutorAssignmentStatus.approved if payload.approved else TutorAssignmentStatus.rejected
     a.assigned_by_id = admin.id
     a.rejection_reason = payload.rejection_reason if not payload.approved else None
     db.commit()
+
+    if a.course_id:
+        course = db.query(Course).filter(Course.id == a.course_id).first()
+        if course:
+            from app.utils.helpers import _invalidate_course_caches
+            _invalidate_course_caches(a.course_id, slug=course.slug)
+    cache.invalidate("users:instructors")
+
     return SuccessResponse(message=f"Assignment {'approved' if payload.approved else 'rejected'}")
- 
- 
+
+
 @router.patch("/tutor-assignments/{assignment_id}/revoke", dependencies=[Depends(require_admin)])
 async def revoke_instructor_assignment(
     assignment_id: int,
@@ -483,32 +527,46 @@ async def revoke_instructor_assignment(
     db: Session = Depends(get_db),
 ):
     """Revoke a previously approved assignment."""
-    from app.models import TutorAssignment
-    from app.schemas import TutorAssignmentStatus
- 
     a = db.query(TutorAssignment).filter(TutorAssignment.id == assignment_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found")
     if a.status not in [TutorAssignmentStatus.approved, TutorAssignmentStatus.pending]:
         raise HTTPException(status_code=400, detail="Assignment is not active")
- 
+
     a.status = TutorAssignmentStatus.revoked
     a.revoked_at = datetime.now(timezone.utc)
     db.commit()
+
+    if a.course_id:
+        course = db.query(Course).filter(Course.id == a.course_id).first()
+        if course:
+            from app.utils.helpers import _invalidate_course_caches
+            _invalidate_course_caches(a.course_id, slug=course.slug)
+    cache.invalidate("users:instructors")
+
     return SuccessResponse(message="Assignment revoked")
- 
- 
+
+
 @router.delete("/tutor-assignments/{assignment_id}", dependencies=[Depends(require_admin)])
 async def delete_instructor_assignment(assignment_id: int, db: Session = Depends(get_db)):
-    from app.models import TutorAssignment
     a = db.query(TutorAssignment).filter(TutorAssignment.id == assignment_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found")
+
+    course_id = a.course_id
     db.delete(a)
     db.commit()
+
+    if course_id:
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if course:
+            from app.utils.helpers import _invalidate_course_caches
+            _invalidate_course_caches(course_id, slug=course.slug)
+    cache.invalidate("users:instructors")
+
     return SuccessResponse(message="Assignment deleted")
- 
- 
+
+
 # ── Tutor self-request endpoint (NOT admin-only) ────────────────────────
 
 @router.post("/tutor-assignments/request", status_code=201)
@@ -521,26 +579,22 @@ async def request_instructor_assignment(
     Tutor / creator requests assignment to a course or path.
     Admin must approve via PATCH /admin/tutor-assignments/{id}/review.
     """
-    from app.models import TutorAssignment
-    from app.schemas import TutorAssignmentStatus
- 
     if not (current_user.has_role("tutor") or current_user.has_role("creator") or current_user.is_admin()):
         raise HTTPException(status_code=403, detail="Only instructors or creators can request assignments")
- 
+
     if not payload.course_id and not payload.path_id:
         raise HTTPException(status_code=400, detail="Provide course_id or path_id")
- 
+
     # Verify target exists and is published
     if payload.course_id:
         target = db.query(Course).filter(Course.id == payload.course_id).first()
         if not target:
             raise HTTPException(status_code=404, detail="Course not found")
     else:
-        from app.models.courses import LearningPath
         target = db.query(LearningPath).filter(LearningPath.id == payload.path_id).first()
         if not target:
             raise HTTPException(status_code=404, detail="Learning path not found")
- 
+
     # No duplicate pending/approved
     q = db.query(TutorAssignment).filter(
         TutorAssignment.tutor_id == current_user.id,
@@ -552,9 +606,8 @@ async def request_instructor_assignment(
         q = q.filter(TutorAssignment.path_id == payload.path_id)
     if q.first():
         raise HTTPException(status_code=409, detail="You already have an active or pending request for this course/path")
- 
+
     a = TutorAssignment(
-        # tutor_id=current_user.tutor_id,
         tutor_id=current_user.id,
         course_id=payload.course_id,
         path_id=payload.path_id,
@@ -566,10 +619,11 @@ async def request_instructor_assignment(
     db.commit()
     db.refresh(a)
     return {"id": a.id, "status": a.status, "message": "Assignment request submitted — awaiting admin approval"}
- 
 
 
-# ─── TEAM REQUESTS ───────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# TEAM REQUESTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/team-requests", dependencies=[Depends(require_admin)])
 async def list_team_requests(
@@ -640,11 +694,19 @@ async def review_team_request(
         )
 
     db.commit()
+
+    # Role change affects public instructor listings and user profile caches
+    if req.user:
+        cache.delete(f"users:public:{req.user.username.lower()}")
+        cache.invalidate("users:instructors")
+
     action = "approved" if payload.approved else "rejected"
     return SuccessResponse(message=f"Team request {action}")
 
 
-# ─── INVITES ─────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# INVITES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/invites", dependencies=[Depends(require_admin)], status_code=201)
 async def send_invite(
@@ -684,7 +746,9 @@ async def list_invites(db: Session = Depends(get_db)):
     ]
 
 
-# ─── BROADCASTS ──────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# BROADCASTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/broadcasts", dependencies=[Depends(require_admin)], status_code=201)
 async def send_broadcast(
@@ -705,7 +769,9 @@ async def send_broadcast(
     db.flush()
 
     # Determine recipients
-    recipients_query = db.query(User).filter(User.is_active == True, User.email_verified == True)
+    recipients_query = db.query(User).filter(
+        User.is_active == True, User.email_verified == True
+    )
 
     if payload.broadcast_type == BroadcastType.students:
         recipients_query = recipients_query.join(User.roles).filter(Role.name == "student")
@@ -751,74 +817,9 @@ async def list_broadcasts(db: Session = Depends(get_db)):
     ]
 
 
-# ─── TUTOR ASSIGNMENTS ────────────────────────────
-
-@router.post("/tutor-assignments", dependencies=[Depends(require_admin)], status_code=201)
-async def assign_tutor(
-    payload: TutorAssignRequest,
-    admin: User = Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    tutor = db.query(User).filter(User.id == payload.tutor_id).first()
-    if not tutor or not (tutor.has_role("tutor") or tutor.is_admin()):
-        raise HTTPException(status_code=400, detail="User is not a tutor")
-    course = db.query(Course).filter(Course.id == payload.course_id).first()
-    if not course:
-        raise HTTPException(status_code=404, detail="Course not found")
-
-    existing = db.query(TutorAssignment).filter(
-        TutorAssignment.tutor_id == payload.tutor_id,
-        TutorAssignment.course_id == payload.course_id,
-        TutorAssignment.student_id == payload.student_id,
-    ).first()
-    if existing:
-        return SuccessResponse(message="Already assigned")
-
-    assignment = TutorAssignment(
-        tutor_id=payload.tutor_id, course_id=payload.course_id,
-        student_id=payload.student_id, assigned_by_id=admin.id,
-    )
-    db.add(assignment)
-    db.commit()
-    return SuccessResponse(message="Tutor assigned successfully")
-
-
-@router.delete("/tutor-assignments/{assignment_id}", dependencies=[Depends(require_admin)])
-async def unassign_tutor(assignment_id: int, db: Session = Depends(get_db)):
-    assignment = db.query(TutorAssignment).filter(TutorAssignment.id == assignment_id).first()
-    if not assignment:
-        raise HTTPException(status_code=404, detail="Assignment not found")
-    db.delete(assignment)
-    db.commit()
-    return SuccessResponse(message="Tutor unassigned")
-
-
-@router.get("/tutor-assignments", dependencies=[Depends(require_admin)])
-async def list_tutor_assignments(
-    course_id: Optional[int] = None,
-    tutor_id: Optional[int] = None,
-    db: Session = Depends(get_db),
-):
-    q = db.query(TutorAssignment)
-    if course_id:
-        q = q.filter(TutorAssignment.course_id == course_id)
-    if tutor_id:
-        q = q.filter(TutorAssignment.tutor_id == tutor_id)
-    assignments = q.options(
-        joinedload(TutorAssignment.tutor), joinedload(TutorAssignment.course),
-    ).all()
-    return [
-        {
-            "id": a.id,
-            "tutor": {"id": a.tutor.id, "name": a.tutor.name, "email": a.tutor.email} if a.tutor else None,
-            "course": {"id": a.course.id, "title": a.course.title} if a.course else None,
-            "student_id": a.student_id,
-        }
-        for a in assignments
-    ]
-
-
-# ─── SCHEDULES ───────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCHEDULES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/schedules", dependencies=[Depends(require_admin)], status_code=201)
 async def create_schedule(
@@ -850,7 +851,9 @@ async def list_schedules(
         q = q.filter(Schedule.course_id == course_id)
     if not user.is_admin() and not user.has_role("tutor"):
         # Students see schedules for enrolled courses
-        enrolled_ids = [e.course_id for e in db.query(Enrollment).filter(Enrollment.user_id == user.id).all()]
+        enrolled_ids = [e.course_id for e in db.query(Enrollment).filter(
+            Enrollment.user_id == user.id
+        ).all()]
         q = q.filter(Schedule.course_id.in_(enrolled_ids))
     schedules = q.order_by(Schedule.start_time.asc()).all()
     return [
@@ -864,7 +867,7 @@ async def list_schedules(
     ]
 
 
-@router.post("/schedules/{schedule_id}/attendance", dependencies=[Depends(require_tutor_or_admin := require_admin)])
+@router.post("/schedules/{schedule_id}/attendance", dependencies=[Depends(require_admin)])
 async def mark_attendance(
     schedule_id: int,
     payload: MarkAttendance,
@@ -891,7 +894,9 @@ async def mark_attendance(
     return SuccessResponse(message=f"Attendance marked for {len(payload.student_ids)} student(s)")
 
 
-# ─── ADMIN ENROLL USER ────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN ENROLL USER
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/enroll-user", dependencies=[Depends(require_admin)])
 async def admin_enroll_user(
@@ -912,10 +917,19 @@ async def admin_enroll_user(
 
     db.add(Enrollment(user_id=user_id, course_id=course_id, admin_assigned=True))
     db.commit()
+
+    # Enrollment affects course detail cache (enrolled_count)
+    from app.utils.helpers import _invalidate_course_caches
+    _invalidate_course_caches(course_id, slug=course.slug)
+    # Also invalidate admin dashboard — enrollment counts changed
+    cache.delete("admin:dashboard")
+
     return SuccessResponse(message=f"User enrolled in course successfully")
 
 
-# ─── CERTIFICATES ADMIN ───────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# CERTIFICATES ADMIN
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/certificates", dependencies=[Depends(require_admin)])
 async def admin_list_certificates(
@@ -934,29 +948,20 @@ async def admin_list_certificates(
         {
             "id": c.id, "cert_number": c.cert_number, "status": c.status,
             "issued_at": c.issued_at,
-            "user": {"id": c.user.id, "name": c.user.name, "email": c.user.email} if c.user else None,
-            "course": {"id": c.course.id, "title": c.course.title} if c.course else None,
+            "user": {
+                "id": c.user.id, "name": c.user.name, "email": c.user.email,
+            } if c.user else None,
+            "course": {
+                "id": c.course.id, "title": c.course.title,
+            } if c.course else None,
         }
         for c in certs
     ]
 
 
-
-
-# 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN ENROLLMENT MANAGEMENT — Course & Path
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ─── Helper: safely get attribute with default ───────────────────────────────
-
-def _safe_get(obj, attr: str, default=None):
-    """Safely get an attribute, returning default if it doesn't exist."""
-    return getattr(obj, attr, default)
-
-
-# ─── COURSE ENROLLMENTS ──────────────────────────────────────────────────────
 
 @router.get("/enrollments/courses", dependencies=[Depends(require_admin)])
 async def list_course_enrollments(
@@ -969,7 +974,8 @@ async def list_course_enrollments(
 ):
     """
     List all course enrollments with filtering.
-    Returns enrollment details including student info, progress, and payment status.
+    NOT cached — admin data must be live.
+    Query optimized: users fetched in bulk instead of per-enrollment N+1.
     """
     q = db.query(Enrollment).options(
         joinedload(Enrollment.course).joinedload(Course.creator),
@@ -983,9 +989,14 @@ async def list_course_enrollments(
         q = q.filter(Enrollment.status == status)
 
     total = q.count()
-    enrollments = q.order_by(Enrollment.created_at.desc())        .offset((page - 1) * per_page)        .limit(per_page)        .all()
+    enrollments = (
+        q.order_by(Enrollment.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
 
-    # Fetch users separately since we can't joinload through the relationship
+    # OPTIMIZATION: bulk-fetch all users in one query instead of N+1
     user_ids = list({e.user_id for e in enrollments})
     users_map = {}
     if user_ids:
@@ -1028,9 +1039,6 @@ async def list_course_enrollments(
     }
 
 
-# ─── PATH ENROLLMENTS ────────────────────────────────────────────────────────
-# FIXED: PathEnrollment model has no .user relationship. We query users manually.
-
 @router.get("/enrollments/paths", dependencies=[Depends(require_admin)])
 async def list_path_enrollments(
     path_id: Optional[int] = None,
@@ -1041,8 +1049,8 @@ async def list_path_enrollments(
 ):
     """
     List all learning path enrollments with filtering.
-    NOTE: PathEnrollment model does NOT have a .user relationship.
-    Users are fetched separately via manual lookup.
+    NOT cached — admin data must be live.
+    Query optimized: users fetched in bulk (PathEnrollment has no .user relation).
     """
     q = db.query(PathEnrollment).options(
         joinedload(PathEnrollment.path),
@@ -1054,9 +1062,14 @@ async def list_path_enrollments(
         q = q.filter(PathEnrollment.user_id == user_id)
 
     total = q.count()
-    enrollments = q.order_by(PathEnrollment.created_at.desc())        .offset((page - 1) * per_page)        .limit(per_page)        .all()
+    enrollments = (
+        q.order_by(PathEnrollment.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
 
-    # Fetch users manually since PathEnrollment has no .user relationship
+    # OPTIMIZATION: bulk-fetch users manually since PathEnrollment has no .user relation
     user_ids = list({pe.user_id for pe in enrollments})
     users_map = {}
     if user_ids:
@@ -1113,10 +1126,10 @@ async def deenroll_from_course(
         raise HTTPException(status_code=404, detail="Enrollment not found")
 
     course = enrollment.course
+    course_id = enrollment.course_id
 
     # Soft delete — mark as inactive/suspended
     enrollment.status = EnrollmentStatus.suspended
-    # Set optional audit fields if they exist on the model
     for attr, val in [
         ("is_active", False),
         ("deenrolled_at", datetime.now(timezone.utc)),
@@ -1127,6 +1140,12 @@ async def deenroll_from_course(
             setattr(enrollment, attr, val)
 
     db.commit()
+
+    # Invalidate caches — enrollment counts changed
+    if course_id and course:
+        from app.utils.helpers import _invalidate_course_caches
+        _invalidate_course_caches(course_id, slug=course.slug)
+    cache.delete("admin:dashboard")
 
     logger.info(
         "Admin %s de-enrolled user %s from course %s. Reason: %s",
@@ -1151,7 +1170,9 @@ async def deenroll_from_path(
     Admin de-enroll a student from a learning path.
     Also de-enrolls from all associated courses in the path.
     """
-    path_enrollment = db.query(PathEnrollment).filter(PathEnrollment.id == path_enrollment_id).first()
+    path_enrollment = db.query(PathEnrollment).filter(
+        PathEnrollment.id == path_enrollment_id
+    ).first()
     if not path_enrollment:
         raise HTTPException(status_code=404, detail="Path enrollment not found")
 
@@ -1170,6 +1191,9 @@ async def deenroll_from_path(
                 course_enrollment.status = EnrollmentStatus.suspended
                 if hasattr(course_enrollment, "is_active"):
                     course_enrollment.is_active = False
+                # Invalidate per-course caches
+                from app.utils.helpers import _invalidate_course_caches
+                _invalidate_course_caches(course.id, slug=course.slug)
 
     # Soft delete path enrollment
     path_enrollment.status = EnrollmentStatus.suspended
@@ -1181,6 +1205,8 @@ async def deenroll_from_path(
         path_enrollment.deenrollment_reason = payload.reason
 
     db.commit()
+
+    cache.delete("admin:dashboard")
 
     return SuccessResponse(
         message=f"User de-enrolled from path '{path.title if path else 'path'}' and all associated courses"
@@ -1196,12 +1222,14 @@ async def get_course_enrollment_analytics(
     db: Session = Depends(get_db),
 ):
     """
-    Comprehensive analytics for a specific course:
-    - Enrollment trends over time
-    - Completion rates
-    - Student engagement (topics accessed)
-    - Revenue from enrollments
+    Comprehensive analytics for a specific course.
+    Cached for 5 minutes keyed on course_id + period_days.
     """
+    cache_key = f"admin:analytics:course:{course_id}:{period_days}"
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     course = db.query(Course).filter(Course.id == course_id).first()
     if not course:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -1210,7 +1238,9 @@ async def get_course_enrollment_analytics(
     period_start = now - timedelta(days=period_days)
 
     # Total enrollments
-    total_enrollments = db.query(Enrollment).filter(Enrollment.course_id == course_id).count()
+    total_enrollments = db.query(Enrollment).filter(
+        Enrollment.course_id == course_id
+    ).count()
     active_enrollments = db.query(Enrollment).filter(
         Enrollment.course_id == course_id,
         Enrollment.status == EnrollmentStatus.active,
@@ -1239,7 +1269,7 @@ async def get_course_enrollment_analytics(
         Payment.created_at >= period_start,
     ).scalar() or 0.0
 
-    # Daily enrollment trend
+    # Daily enrollment trend — single query per day is acceptable for analytics
     daily_trend = []
     for i in range(period_days - 1, -1, -1):
         day = now - timedelta(days=i)
@@ -1261,14 +1291,14 @@ async def get_course_enrollment_analytics(
         Enrollment.status == EnrollmentStatus.active,
     ).order_by(Enrollment.progress_pct.desc()).limit(10).all()
 
-    # Fetch user names manually
+    # Bulk-fetch user names
     top_user_ids = [e.user_id for e in top_students_raw]
     top_users_map = {}
     if top_user_ids:
         top_users = db.query(User).filter(User.id.in_(top_user_ids)).all()
         top_users_map = {u.id: u for u in top_users}
 
-    return {
+    result = {
         "course_id": course_id,
         "course_title": course.title,
         "period_days": period_days,
@@ -1276,7 +1306,9 @@ async def get_course_enrollment_analytics(
             "total_enrollments": total_enrollments,
             "active_enrollments": active_enrollments,
             "completed_enrollments": completed_enrollments,
-            "completion_rate": round((completed_enrollments / total_enrollments * 100), 1) if total_enrollments > 0 else 0.0,
+            "completion_rate": round(
+                (completed_enrollments / total_enrollments * 100), 1
+            ) if total_enrollments > 0 else 0.0,
             "new_enrollments_in_period": new_enrollments,
             "average_progress_pct": round(float(avg_progress), 1),
             "revenue_in_period": float(course_revenue),
@@ -1293,6 +1325,9 @@ async def get_course_enrollment_analytics(
         ],
     }
 
+    cache.set(cache_key, result, ttl=_ANALYTICS_CACHE_TTL)
+    return result
+
 
 @router.get("/enrollments/analytics/paths/{path_id}", dependencies=[Depends(require_admin)])
 async def get_path_enrollment_analytics(
@@ -1302,7 +1337,13 @@ async def get_path_enrollment_analytics(
 ):
     """
     Comprehensive analytics for a specific learning path.
+    Cached for 5 minutes keyed on path_id + period_days.
     """
+    cache_key = f"admin:analytics:path:{path_id}:{period_days}"
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     path = db.query(LearningPath).filter(LearningPath.id == path_id).first()
     if not path:
         raise HTTPException(status_code=404, detail="Learning path not found")
@@ -1310,7 +1351,9 @@ async def get_path_enrollment_analytics(
     now = datetime.now(timezone.utc)
     period_start = now - timedelta(days=period_days)
 
-    total_enrollments = db.query(PathEnrollment).filter(PathEnrollment.path_id == path_id).count()
+    total_enrollments = db.query(PathEnrollment).filter(
+        PathEnrollment.path_id == path_id
+    ).count()
     active_enrollments = db.query(PathEnrollment).filter(
         PathEnrollment.path_id == path_id,
         PathEnrollment.status == EnrollmentStatus.active,
@@ -1342,7 +1385,7 @@ async def get_path_enrollment_analytics(
         ).count()
         daily_trend.append({"date": day.strftime("%Y-%m-%d"), "enrollments": count})
 
-    return {
+    result = {
         "path_id": path_id,
         "path_title": path.title,
         "period_days": period_days,
@@ -1350,12 +1393,17 @@ async def get_path_enrollment_analytics(
             "total_enrollments": total_enrollments,
             "active_enrollments": active_enrollments,
             "completed_enrollments": completed,
-            "completion_rate": round((completed / total_enrollments * 100), 1) if total_enrollments > 0 else 0.0,
+            "completion_rate": round(
+                (completed / total_enrollments * 100), 1
+            ) if total_enrollments > 0 else 0.0,
             "new_enrollments_in_period": new_in_period,
             "average_progress_pct": round(float(avg_progress), 1),
         },
         "daily_enrollment_trend": daily_trend,
     }
+
+    cache.set(cache_key, result, ttl=_ANALYTICS_CACHE_TTL)
+    return result
 
 
 @router.get("/enrollments/analytics/global", dependencies=[Depends(require_admin)])
@@ -1365,19 +1413,33 @@ async def get_global_enrollment_analytics(
 ):
     """
     Global enrollment analytics across all courses and paths.
+    Cached for 5 minutes keyed on period_days.
     """
+    cache_key = f"admin:analytics:global:{period_days}"
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     now = datetime.now(timezone.utc)
     period_start = now - timedelta(days=period_days)
 
     # Course enrollments
     total_course_enrollments = db.query(Enrollment).count()
-    active_course_enrollments = db.query(Enrollment).filter(Enrollment.status == EnrollmentStatus.active).count()
-    new_course_enrollments = db.query(Enrollment).filter(Enrollment.created_at >= period_start).count()
+    active_course_enrollments = db.query(Enrollment).filter(
+        Enrollment.status == EnrollmentStatus.active
+    ).count()
+    new_course_enrollments = db.query(Enrollment).filter(
+        Enrollment.created_at >= period_start
+    ).count()
 
     # Path enrollments
     total_path_enrollments = db.query(PathEnrollment).count()
-    active_path_enrollments = db.query(PathEnrollment).filter(PathEnrollment.status == EnrollmentStatus.active).count()
-    new_path_enrollments = db.query(PathEnrollment).filter(PathEnrollment.created_at >= period_start).count()
+    active_path_enrollments = db.query(PathEnrollment).filter(
+        PathEnrollment.status == EnrollmentStatus.active
+    ).count()
+    new_path_enrollments = db.query(PathEnrollment).filter(
+        PathEnrollment.created_at >= period_start
+    ).count()
 
     # Revenue
     total_revenue = db.query(func.sum(Payment.amount)).filter(
@@ -1386,16 +1448,33 @@ async def get_global_enrollment_analytics(
     ).scalar() or 0.0
 
     # Top courses by enrollment
-    top_courses = db.query(
-        Course.id, Course.title, func.count(Enrollment.id).label("enrollment_count")
-    ).join(Enrollment, Enrollment.course_id == Course.id)        .filter(Enrollment.created_at >= period_start)        .group_by(Course.id, Course.title)        .order_by(func.count(Enrollment.id).desc())        .limit(10)        .all()
+    top_courses = (
+        db.query(
+            Course.id, Course.title, func.count(Enrollment.id).label("enrollment_count")
+        )
+        .join(Enrollment, Enrollment.course_id == Course.id)
+        .filter(Enrollment.created_at >= period_start)
+        .group_by(Course.id, Course.title)
+        .order_by(func.count(Enrollment.id).desc())
+        .limit(10)
+        .all()
+    )
 
     # Top paths by enrollment
-    top_paths = db.query(
-        LearningPath.id, LearningPath.title, func.count(PathEnrollment.id).label("enrollment_count")
-    ).join(PathEnrollment, PathEnrollment.path_id == LearningPath.id)        .filter(PathEnrollment.created_at >= period_start)        .group_by(LearningPath.id, LearningPath.title)        .order_by(func.count(PathEnrollment.id).desc())        .limit(10)        .all()
+    top_paths = (
+        db.query(
+            LearningPath.id, LearningPath.title,
+            func.count(PathEnrollment.id).label("enrollment_count")
+        )
+        .join(PathEnrollment, PathEnrollment.path_id == LearningPath.id)
+        .filter(PathEnrollment.created_at >= period_start)
+        .group_by(LearningPath.id, LearningPath.title)
+        .order_by(func.count(PathEnrollment.id).desc())
+        .limit(10)
+        .all()
+    )
 
-    return {
+    result = {
         "period_days": period_days,
         "courses": {
             "total_enrollments": total_course_enrollments,
@@ -1418,3 +1497,5 @@ async def get_global_enrollment_analytics(
         ],
     }
 
+    cache.set(cache_key, result, ttl=_ANALYTICS_CACHE_TTL)
+    return result

@@ -1,7 +1,9 @@
 import secrets
 import string
+import json as _json
 from datetime import datetime, timezone
 from fastapi import Request
+from app.core.performance.cache_config import cache
 
 def generate_secure_code(length: int = 6) -> str:
     """Generate secure verification code (alphanumeric uppercase)"""
@@ -26,4 +28,32 @@ def get_client_ip(request: Request) -> str:
     
     # Fallback to direct client host
     return request.client.host if request.client else "unknown"
+
+# ── Cache helpers ─────────────────────────────────────────────────────────────
+
+def _to_cacheable(data: dict) -> dict:
+    """
+    Convert a response dict to a JSON-safe form before storing in cache.
+
+    FastAPI serialises datetime/enum objects automatically when returning
+    from a route, but json.dumps (used by RedisService) does not.
+    Round-tripping through json with default=str converts all non-primitive
+    types to strings, making the dict safe for both the Redis and LRU backends.
+    """
+    return _json.loads(_json.dumps(data, default=str))
+
+
+def _invalidate_course_caches(course_id: int, slug: str = None) -> None:
+    """
+    Invalidate all cache entries that are affected when a course changes.
+
+    Deletes:
+      - courses:detail:{course_id}        exact key by ID
+      - courses:detail:{slug}             exact key by slug (if slug known)
+      - all keys matching "courses:list"  pattern — covers every paginated listing
+    """
+    cache.delete(f"courses:detail:{course_id}")
+    if slug:
+        cache.delete(f"courses:detail:{slug}")
+    cache.invalidate("courses:list")
 

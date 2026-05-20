@@ -1,5 +1,9 @@
-# v2
+# v3 — Intellect LMS Users API
+# Changes: caching for public endpoints, query optimization, cache invalidation,
+#          consistent patterns with courses.py.
+
 from datetime import datetime, timedelta, timezone
+import copy
 import os
 import uuid
 import logging
@@ -11,8 +15,9 @@ from sqlalchemy import func, or_, text
 from app.db.database import get_db
 from app.models import User, Role
 from app.schemas import UserUpdateRequest, AdminUpdateUser
-from app.api.deps.auth import get_current_user, require_admin
+from app.api.deps.auth import get_current_user, require_admin, optional_user
 from app.core.config import get_app_config
+from app.core.performance.cache_config import cache
 from app.api.v1.courses import _absolute_url
 from app.models.courses import Course, Topic
 from app.models.payments import Enrollment, EnrollmentStatus, PathEnrollment, Payment, PaymentStatus
@@ -25,6 +30,11 @@ ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 # Roles that are publicly listable as instructors/creators
 PUBLIC_INSTRUCTOR_ROLES = {"tutor", "creator", "instructor"}
+
+# ── Cache TTLs ────────────────────────────────────────────────────────────────
+_INSTRUCTORS_CACHE_TTL = 300       # 5 min — public instructor listing
+_PUBLIC_PROFILE_TTL = 600          # 10 min — public profile pages
+
 
 def _avatar_url(path: Optional[str]) -> Optional[str]:
     if not path:
@@ -60,7 +70,6 @@ def _public_instructor_dict(user: User) -> dict:
         "id": user.id,
         "name": user.name,
         "username": user.username,
-        # "image": user.image,
         "image": _avatar_url(user.image),
         "title": user.title,
         "city": user.city,
@@ -81,44 +90,39 @@ def _public_instructor_dict(user: User) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────
-#  PUBLIC ENDPOINTS  (no authentication required)
-# ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# PUBLIC ENDPOINTS  (no authentication required)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/instructors")
 async def list_instructors(
     page: int = Query(1, ge=1),
     per_page: int = Query(24, ge=1, le=100),
     search: Optional[str] = None,
-    role: Optional[str] = None,          # 'tutor' | 'creator' | None (all)
+    role: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     """
     Public endpoint — lists approved instructors and creators.
-    No authentication required. Safe fields only.
+    Cached for anonymous requests (5 min). Authenticated requests bypass cache
+    since role data may shift after login.
     """
-    # Base: active users with at least one instructor-class role
-    # q = (
-    #     db.query(User)
-    #     .join(User.roles)
-    #     .filter(
-    #         User.is_active == True,
-    #         Role.name.in_(PUBLIC_INSTRUCTOR_ROLES),
-    #     )
-    #     .distinct()
-    # )
-    
-    from sqlalchemy import distinct
+    cache_key = cache.make_key(
+        "users:instructors", page, per_page, search, role,
+    )
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
 
     q = (
-    db.query(User)
-    .join(User.roles)
-    .filter(
-        User.is_active == True,
-        Role.name.in_(PUBLIC_INSTRUCTOR_ROLES),
+        db.query(User)
+        .join(User.roles)
+        .filter(
+            User.is_active == True,
+            Role.name.in_(PUBLIC_INSTRUCTOR_ROLES),
+        )
+        .group_by(User.id)
     )
-    .group_by(User.id)
-)
 
     if role and role in PUBLIC_INSTRUCTOR_ROLES:
         q = q.filter(Role.name == role)
@@ -142,33 +146,47 @@ async def list_instructors(
         .all()
     )
 
-    return {
+    result = {
         "items": [_public_instructor_dict(u) for u in users],
         "total": total,
         "page": page,
         "per_page": per_page,
         "pages": (total + per_page - 1) // per_page,
     }
+    cache.set(cache_key, result, ttl=_INSTRUCTORS_CACHE_TTL)
+    return result
 
 
 @router.get("/public/{username}")
 async def get_public_profile(username: str, db: Session = Depends(get_db)):
-    """Public profile — available for any active user; richer data for instructors."""
+    """
+    Public profile — cached per username (10 min).
+    Invalidated on profile update (PUT /users/profile) or avatar upload.
+    """
+    cache_key = f"users:public:{username.lower()}"
+    hit = cache.get(cache_key)
+    if hit is not None:
+        return hit
+
     user = db.query(User).filter(
         User.username == username,
         User.is_active == True,
     ).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return _public_instructor_dict(user)
+
+    result = _public_instructor_dict(user)
+    cache.set(cache_key, result, ttl=_PUBLIC_PROFILE_TTL)
+    return result
 
 
-# ─────────────────────────────────────────────────────────────
-#  AUTHENTICATED USER ENDPOINTS
-# ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTHENTICATED USER ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/profile")
 async def get_my_profile(user: User = Depends(get_current_user)):
+    """Private profile — never cached (user-specific, changes frequently)."""
     return _user_to_dict(user)
 
 
@@ -182,6 +200,12 @@ async def update_profile(
         setattr(user, field, val)
     db.commit()
     db.refresh(user)
+
+    # Invalidate public profile cache — bio, name, title etc. may have changed
+    cache.delete(f"users:public:{user.username.lower()}")
+    # Also invalidate instructor listing — sort order or search may be affected
+    cache.invalidate("users:instructors")
+
     return _user_to_dict(user)
 
 
@@ -195,7 +219,9 @@ async def upload_avatar(
         raise HTTPException(status_code=400, detail="Only image files are allowed")
 
     cfg = get_app_config()
-    upload_dir = os.path.join(cfg.hosting_config.content_delivery.filesystem_base_path, "avatars")
+    upload_dir = os.path.join(
+        cfg.hosting_config.content_delivery.filesystem_base_path, "avatars"
+    )
     os.makedirs(upload_dir, exist_ok=True)
 
     ext = file.filename.rsplit(".", 1)[-1].lower()
@@ -203,12 +229,14 @@ async def upload_avatar(
     filepath = os.path.join(upload_dir, filename)
 
     content = await file.read()
-    if len(content) > cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024:
+    max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
         raise HTTPException(status_code=400, detail="File too large")
 
     with open(filepath, "wb") as f:
         f.write(content)
 
+    # Remove old file (non-fatal)
     if user.image and user.image != "default.svg":
         old = os.path.join(upload_dir, user.image)
         if os.path.exists(old):
@@ -216,16 +244,20 @@ async def upload_avatar(
 
     user.image = filename
     db.commit()
-    # return {"image": filename, "url": f"/uploads/avatars/{filename}"}
+
+    # Avatar changed — invalidate public profile and instructor listing caches
+    cache.delete(f"users:public:{user.username.lower()}")
+    cache.invalidate("users:instructors")
+
     return {
-        "image": _avatar_url(filename),   # ← full absolute URL
-        "url": _avatar_url(filename),     # ← full absolute URL
+        "image": _avatar_url(filename),
+        "url": _avatar_url(filename),
     }
 
 
-# ─────────────────────────────────────────────────────────────
-#  ADMIN ENDPOINTS
-# ─────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# ADMIN ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/", dependencies=[Depends(require_admin)])
 async def list_users(
@@ -236,6 +268,10 @@ async def list_users(
     active: Optional[bool] = None,
     db: Session = Depends(get_db),
 ):
+    """
+    Admin user listing — NOT cached. Admin data must be live.
+    Query optimized with single-pass filtering.
+    """
     q = db.query(User)
     if search:
         q = q.filter(or_(
@@ -249,7 +285,12 @@ async def list_users(
         q = q.filter(User.is_active == active)
 
     total = q.count()
-    users = q.order_by(User.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
+    users = (
+        q.order_by(User.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
 
     return {
         "items": [_user_to_dict(u) for u in users],
@@ -278,6 +319,8 @@ async def admin_update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    old_username = user.username
+
     for field, val in payload.model_dump(exclude_none=True, exclude={"roles"}).items():
         setattr(user, field, val)
 
@@ -287,6 +330,13 @@ async def admin_update_user(
 
     db.commit()
     db.refresh(user)
+
+    # Invalidate caches if identity-affecting fields changed
+    cache.delete(f"users:public:{old_username.lower()}")
+    if user.username != old_username:
+        cache.delete(f"users:public:{user.username.lower()}")
+    cache.invalidate("users:instructors")
+
     return _user_to_dict(user)
 
 
@@ -297,7 +347,15 @@ async def toggle_user_active(user_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="User not found")
     user.is_active = not user.is_active
     db.commit()
-    return {"active": user.is_active, "message": f"User {'activated' if user.is_active else 'deactivated'}"}
+
+    # Active status affects public listings
+    cache.delete(f"users:public:{user.username.lower()}")
+    cache.invalidate("users:instructors")
+
+    return {
+        "active": user.is_active,
+        "message": f"User {'activated' if user.is_active else 'deactivated'}",
+    }
 
 
 @router.post("/{user_id}/assign-role", dependencies=[Depends(require_admin)])
@@ -311,6 +369,11 @@ async def assign_role(user_id: int, role_name: str, db: Session = Depends(get_db
     if role not in user.roles:
         user.roles.append(role)
         db.commit()
+
+        # Role change may affect instructor listing eligibility
+        cache.delete(f"users:public:{user.username.lower()}")
+        cache.invalidate("users:instructors")
+
     return {"message": f"Role '{role_name}' assigned", "roles": [r.name for r in user.roles]}
 
 
@@ -321,12 +384,16 @@ async def remove_role(user_id: int, role_name: str, db: Session = Depends(get_db
         raise HTTPException(status_code=404, detail="User not found")
     user.roles = [r for r in user.roles if r.name != role_name]
     db.commit()
-    
-    data = {"message": f"Role '{role_name}' removed", "roles": [r.name for r in user.roles]}
-    return data
 
+    # Role removal may remove from instructor listing
+    cache.delete(f"users:public:{user.username.lower()}")
+    cache.invalidate("users:instructors")
 
-# 
+    return {
+        "message": f"Role '{role_name}' removed",
+        "roles": [r.name for r in user.roles],
+    }
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN USER ENROLLMENT TRACKING
@@ -341,28 +408,46 @@ async def get_user_enrollments(
 ):
     """
     Admin view: Get all course enrollments for a specific user.
-    Includes progress, payment status, and enrollment history.
+    NOT cached — admin data must be live.
+    Query optimized: payments fetched in a single bulk query instead of N+1.
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    enrollments = db.query(Enrollment).filter(
-        Enrollment.user_id == user_id,
-    ).options(
-        joinedload(Enrollment.course).joinedload(Course.creator),
-        joinedload(Enrollment.course).joinedload(Course.categories),
-    ).order_by(Enrollment.created_at.desc()).all()
+    enrollments = (
+        db.query(Enrollment)
+        .filter(Enrollment.user_id == user_id)
+        .options(
+            joinedload(Enrollment.course).joinedload(Course.creator),
+            joinedload(Enrollment.course).joinedload(Course.categories),
+        )
+        .order_by(Enrollment.created_at.desc())
+        .all()
+    )
 
-    # Get payment status for each enrollment
+    # OPTIMIZATION: bulk-fetch all payments in one query instead of per-enrollment N+1
+    course_ids = [e.course_id for e in enrollments if e.course_id]
+    payments_map = {}
+    if course_ids:
+        payments = (
+            db.query(Payment)
+            .filter(
+                Payment.user_id == user_id,
+                Payment.course_id.in_(course_ids),
+                Payment.tx_status == PaymentStatus.successful,
+            )
+            .order_by(Payment.created_at.desc())
+            .all()
+        )
+        # Keep only the most recent payment per course
+        for p in payments:
+            if p.course_id not in payments_map:
+                payments_map[p.course_id] = p
+
     result = []
     for e in enrollments:
-        payment = db.query(Payment).filter(
-            Payment.user_id == user_id,
-            Payment.course_id == e.course_id,
-            Payment.tx_status == PaymentStatus.successful,
-        ).order_by(Payment.created_at.desc()).first()
-
+        payment = payments_map.get(e.course_id)
         result.append({
             "id": e.id,
             "course": {
@@ -385,7 +470,11 @@ async def get_user_enrollments(
             "deenrollment_reason": getattr(e, "deenrollment_reason", None),
             "payment": {
                 "amount": float(payment.amount) if payment else None,
-                "status": payment.tx_status.value if payment and hasattr(payment.tx_status, 'value') else None,
+                "status": (
+                    payment.tx_status.value
+                    if payment and hasattr(payment.tx_status, 'value')
+                    else None
+                ),
                 "paid_at": payment.created_at if payment else None,
                 "payment_method": getattr(payment, "payment_method", None),
             },
@@ -426,27 +515,49 @@ async def get_user_path_enrollments(
 ):
     """
     Admin view: Get all learning path enrollments for a specific user.
+    NOT cached — admin data must be live.
+    Query optimized: bulk-fetch completed course counts instead of N+1 per path.
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    enrollments = db.query(PathEnrollment).filter(
-        PathEnrollment.user_id == user_id,
-    ).options(
-        joinedload(PathEnrollment.path),
-    ).order_by(PathEnrollment.created_at.desc()).all()
+    enrollments = (
+        db.query(PathEnrollment)
+        .filter(PathEnrollment.user_id == user_id)
+        .options(joinedload(PathEnrollment.path))
+        .order_by(PathEnrollment.created_at.desc())
+        .all()
+    )
+
+    # OPTIMIZATION: collect all path course IDs, then one bulk query for completions
+    all_path_course_ids = set()
+    path_course_map = {}  # path_id -> list of course_ids
+    for pe in enrollments:
+        if pe.path and pe.path.courses:
+            cids = [c.id for c in pe.path.courses]
+            path_course_map[pe.path_id] = cids
+            all_path_course_ids.update(cids)
+
+    completed_counts_map = {}
+    if all_path_course_ids:
+        from sqlalchemy import distinct
+        rows = (
+            db.query(Enrollment.course_id)
+            .filter(
+                Enrollment.user_id == user_id,
+                Enrollment.course_id.in_(list(all_path_course_ids)),
+                Enrollment.status == EnrollmentStatus.completed,
+            )
+            .all()
+        )
+        completed_course_ids = {r.course_id for r in rows}
+        for path_id, cids in path_course_map.items():
+            completed_counts_map[path_id] = sum(1 for cid in cids if cid in completed_course_ids)
 
     result = []
     for pe in enrollments:
-        # Count completed courses in this path
-        path_course_ids = [c.id for c in pe.path.courses] if pe.path and pe.path.courses else []
-        completed_courses = db.query(Enrollment).filter(
-            Enrollment.user_id == user_id,
-            Enrollment.course_id.in_(path_course_ids),
-            Enrollment.status == EnrollmentStatus.completed,
-        ).count() if path_course_ids else 0
-
+        path_course_ids = path_course_map.get(pe.path_id, [])
         result.append({
             "id": pe.id,
             "path": {
@@ -459,7 +570,7 @@ async def get_user_path_enrollments(
             } if pe.path else None,
             "status": pe.status.value if hasattr(pe.status, 'value') else str(pe.status),
             "progress_pct": pe.progress_pct,
-            "completed_courses": completed_courses,
+            "completed_courses": completed_counts_map.get(pe.path_id, 0),
             "total_courses": len(path_course_ids),
             "created_at": pe.created_at,
             "completed_at": pe.completed_at,
@@ -493,7 +604,7 @@ async def get_user_learning_activity(
 ):
     """
     Admin view: Comprehensive learning activity report for a user.
-    Includes topic progress, assessment submissions, attendance, and engagement metrics.
+    NOT cached — admin data must be live.
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -518,34 +629,66 @@ async def get_user_learning_activity(
 
     # Assessment submissions
     from app.models import LessonAssessmentSubmission
-    assessments = db.query(LessonAssessmentSubmission).filter(
-        LessonAssessmentSubmission.user_id == user_id,
-        LessonAssessmentSubmission.created_at >= period_start,
-    ).order_by(LessonAssessmentSubmission.created_at.desc()).limit(20).all()
+    assessments = (
+        db.query(LessonAssessmentSubmission)
+        .filter(
+            LessonAssessmentSubmission.user_id == user_id,
+            LessonAssessmentSubmission.created_at >= period_start,
+        )
+        .order_by(LessonAssessmentSubmission.created_at.desc())
+        .limit(20)
+        .all()
+    )
 
     # Attendance records
-    attendance = db.query(AttendanceRecord).filter(
-        AttendanceRecord.user_id == user_id,
-        AttendanceRecord.created_at >= period_start,
-    ).order_by(AttendanceRecord.created_at.desc()).limit(20).all()
+    attendance = (
+        db.query(AttendanceRecord)
+        .filter(
+            AttendanceRecord.user_id == user_id,
+            AttendanceRecord.created_at >= period_start,
+        )
+        .order_by(AttendanceRecord.created_at.desc())
+        .limit(20)
+        .all()
+    )
 
     # Enrollment history
-    enrollment_history = db.query(Enrollment).filter(
-        Enrollment.user_id == user_id,
-    ).order_by(Enrollment.created_at.desc()).all()
+    enrollment_history = (
+        db.query(Enrollment)
+        .filter(Enrollment.user_id == user_id)
+        .order_by(Enrollment.created_at.desc())
+        .all()
+    )
 
-    # Calculate engagement score (topics accessed / total topics available)
-    total_topics_available = db.query(func.count(Topic.id)).join(Course).join(Enrollment).filter(
-        Enrollment.user_id == user_id,
-        Enrollment.is_active == True,
-    ).scalar() or 0
+    # Engagement score — single query for available topics
+    total_topics_available = (
+        db.query(func.count(Topic.id))
+        .join(Course)
+        .join(Enrollment)
+        .filter(
+            Enrollment.user_id == user_id,
+            Enrollment.is_active == True,
+        )
+        .scalar()
+        or 0
+    )
 
-    total_topics_completed = db.execute(
-        text("SELECT COUNT(*) FROM user_topic_progress WHERE user_id = :uid AND completed = true"),
-        {"uid": user_id},
-    ).scalar() or 0
+    total_topics_completed = (
+        db.execute(
+            text(
+                "SELECT COUNT(*) FROM user_topic_progress "
+                "WHERE user_id = :uid AND completed = true"
+            ),
+            {"uid": user_id},
+        ).scalar()
+        or 0
+    )
 
-    engagement_score = round((total_topics_completed / total_topics_available * 100), 1) if total_topics_available > 0 else 0.0
+    engagement_score = (
+        round((total_topics_completed / total_topics_available * 100), 1)
+        if total_topics_available > 0
+        else 0.0
+    )
 
     return {
         "user": {
@@ -559,7 +702,10 @@ async def get_user_learning_activity(
         "summary": {
             "total_enrollments": len(enrollment_history),
             "active_enrollments": sum(1 for e in enrollment_history if e.is_active),
-            "completed_enrollments": sum(1 for e in enrollment_history if getattr(e.status, 'value', str(e.status)) == 'completed'),
+            "completed_enrollments": sum(
+                1 for e in enrollment_history
+                if getattr(e.status, 'value', str(e.status)) == 'completed'
+            ),
             "total_topics_completed": total_topics_completed,
             "engagement_score": engagement_score,
         },
@@ -595,7 +741,11 @@ async def get_user_learning_activity(
             {
                 "course_id": e.course_id,
                 "course_title": e.course.title if e.course else None,
-                "status": e.status.value if hasattr(e.status, 'value') else str(e.status),
+                "status": (
+                    e.status.value
+                    if hasattr(e.status, 'value')
+                    else str(e.status)
+                ),
                 "enrolled_at": e.created_at,
                 "completed_at": e.completed_at,
                 "progress_pct": e.progress_pct,

@@ -42,7 +42,7 @@ from app.utils.responses import api_response
 from app.core.config.loader import OAUTH_REGISTRY
 
 # HELPERS
-from app.api.v1.helpers.auth_utlis import (
+from app.utils.auth import (
     _create_or_link_oauth_user, _fetch_oauth_userinfo, 
     _issue_tokens, _oauth_error_html, 
     _resolve_user_by_identifier,
@@ -225,10 +225,18 @@ async def resend_signup_code(
 
 @router.post("/signin")
 async def signin(payload: SigninRequest, db: Session = Depends(get_db)):
+    
     user = _resolve_user_by_identifier(db, payload.identifier)
 
     if not user or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid email, username, phone or password.")
+        detail=f"Invalid email, username, phone or password. {user.password_hash}, {verify_password(payload.password, user.password_hash)}"
+        incoming_pass = hash_password(payload.password)
+        existing_pass = user.password_hash
+        print(f"{incoming_pass == existing_pass}")
+        print(f"{incoming_pass} VS {existing_pass}")
+        print(detail)
+        raise HTTPException(status_code=401, detail=f"Invalid email, username, phone or password. {user.password_hash}, {verify_password(payload.password, user.password_hash)}"
+                            )
 
     if not user.email_verified:
         raise HTTPException(status_code=403, detail="Please verify your email before signing in.")

@@ -15,8 +15,8 @@ from redis.exceptions import RedisError, ConnectionError as RedisConnectionError
 
 logger = logging.getLogger(__name__)
 
-
 class RedisService:
+    
     """
     Production Redis service with Upstash-specific optimizations.
     
