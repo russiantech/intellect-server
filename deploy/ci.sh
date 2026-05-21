@@ -71,37 +71,9 @@ regenerate_configs() {
     fi
 }
 
-# full_restart() {
-#     section "Full restart (picks up code changes)"
-#     bash "${DEPLOY_DIR}/control.sh" restart
-# }
-# 2
-# ci.sh — replace the full_restart() function
-
 full_restart() {
-    section "Full restart (cold start — new code from disk)"
-    
-    # Kill supervisor-managed app + any lingering gunicorn/uvicorn processes
-    bash "${DEPLOY_DIR}/control.sh" stop 2>/dev/null || true
-    pkill -9 -f "gunicorn.*${APP_NAME}" 2>/dev/null || true
-    pkill -9 -f "uvicorn.*${APP_NAME}" 2>/dev/null || true
-    sleep 2
-    
-    # Remove stale PID/socket files that can confuse supervisor
-    local spid="${SUPERVISOR_DIR}/supervisord.pid"
-    [[ -f "$spid" ]] && rm -f "$spid"
-    
-    # Start fresh — this loads current code from disk
-    bash "${DEPLOY_DIR}/control.sh" start
-    
-    sleep 3
-    
-    # Verify
-    if health_ok; then
-        success "App restarted and healthy"
-    else
-        die "App restart failed — check logs with: bash deploy/control.sh logs-err"
-    fi
+    section "Full restart (picks up code changes)"
+    bash "${DEPLOY_DIR}/control.sh" restart
 }
 
 # ─────────────────────────────────────────────────────────────────

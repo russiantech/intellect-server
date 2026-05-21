@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # deploy/control.sh — SINGLE SOURCE OF TRUTH for process management.
-# All deploy scripts call this. Never duplicate supervisor logic elsewhere.
 # Usage: bash deploy/control.sh <command>
 set -euo pipefail
 
@@ -13,8 +12,8 @@ usage() {
     echo -e "${C}App Lifecycle${N}"
     echo "  start        Start app (and supervisord if needed)"
     echo "  stop         Stop app gracefully"
-    echo "  restart      FULL restart — new master, NEW CODE from disk"
-    echo "  graceful     Zero-downtime — same code, new workers only"
+    echo "  restart      FULL cold restart — kills master, loads new code from disk"
+    echo "  graceful     Zero-downtime — same code, new workers only (SIGHUP)"
     echo "  status       Show supervisor + process + port status"
     echo ""
     echo -e "${C}Observability${N}"
@@ -48,58 +47,44 @@ cmd_stop() {
     success "Stopped"
 }
 
-# DEFAULT: Full restart. New master → fresh code from disk.
+# COLD RESTART: kills gunicorn master + workers, starts fresh from disk.
+# This is the ONLY restart path that guarantees new code is loaded.
 # Use after: git pull, code edits, dependency changes, new endpoints.
-# cmd_restart() {
-#     section "Restarting ${APP_NAME} — FULL reload (new master, new code)"
-#     ensure_supervisor
-#     $SUPERVISORCTL restart "${APP_NAME}"
-#     sleep 3
-#     $SUPERVISORCTL status "${APP_NAME}"
-# }
-
-# v2
-# control.sh — replace cmd_restart()
-# Option 2: Fix control.sh restart to always be a cold restart
-# Change cmd_restart() in control.sh to kill the master PID explicitly before supervisor restart:
-
 cmd_restart() {
     section "Restarting ${APP_NAME} — COLD restart (new master, new code from disk)"
-    ensure_supervisor
-    
-    # Get current gunicorn master PID
-    local gpid
-    gpid=$($SUPERVISORCTL pid "${APP_NAME}" 2>/dev/null || echo "")
-    
-    # Stop via supervisor first (clean shutdown)
+
+    # 1. Stop via supervisor (clean signal to workers)
+    info "Stopping supervisor-managed app…"
     $SUPERVISORCTL stop "${APP_NAME}" 2>/dev/null || true
     sleep 1
-    
-    # Hard-kill the master if it's still alive (prevents stale preload)
-    if [[ -n "$gpid" && "$gpid" =~ ^[0-9]+$ ]]; then
-        if kill -0 "$gpid" 2>/dev/null; then
-            warn "Killing stale gunicorn master PID $gpid"
-            kill -9 "$gpid" 2>/dev/null || true
-            sleep 1
-        fi
-    fi
-    
-    # Kill any orphaned workers
+
+    # 2. Hard-kill any lingering gunicorn/uvicorn processes
+    #    (prevents stale preload_app master from surviving)
+    info "Killing lingering processes…"
     pkill -9 -f "gunicorn.*${APP_NAME}" 2>/dev/null || true
-    
-    # Remove stale PID file if supervisor left one
-    local pid_file="${SUPERVISOR_DIR}/supervisord.pid"
-    [[ -f "$pid_file" ]] && rm -f "$pid_file"
-    
-    # Start fresh
+    pkill -9 -f "uvicorn.*${APP_NAME}" 2>/dev/null || true
+    sleep 2
+
+    # 3. Ensure supervisor is alive
+    ensure_supervisor
+
+    # 4. Start fresh — loads current code from disk
+    info "Starting fresh app…"
     $SUPERVISORCTL start "${APP_NAME}"
     sleep 3
+
+    # 5. Verify
     $SUPERVISORCTL status "${APP_NAME}"
+
+    if health_ok; then
+        success "App healthy on port ${PORT}"
+    else
+        warn "App started but health check failed — check logs"
+    fi
 }
 
-
-# OPTIONAL: SIGHUP graceful. Same master, new workers. Same code.
-# Use for: worker refresh, memory cleanup, NOT for code deploys.
+# GRACEFUL: SIGHUP reload. Same master, same code, new workers.
+# Use ONLY for: memory cleanup, worker refresh. NEVER for code deploys.
 cmd_graceful() {
     section "Graceful reload ${APP_NAME} — same code, new workers"
     ensure_supervisor
@@ -108,7 +93,7 @@ cmd_graceful() {
     if [[ -n "$gpid" && "$gpid" =~ ^[0-9]+$ ]]; then
         kill -HUP "$gpid" 2>/dev/null && success "Graceful reload triggered" && return 0
     fi
-    warn "No gunicorn master PID — falling back to full restart…"
+    warn "No gunicorn master PID — falling back to cold restart…"
     cmd_restart
 }
 
@@ -222,8 +207,8 @@ cmd_workers() {
 case "${1:-}" in
     start)     cmd_start ;;
     stop)      cmd_stop ;;
-    restart)   cmd_restart ;;      # FULL restart — default for deploys
-    graceful)  cmd_graceful ;;    # SIGHUP — optional, same code
+    restart)   cmd_restart ;;      # COLD restart — loads new code from disk
+    graceful)  cmd_graceful ;;    # SIGHUP — same code, new workers only
     status)    cmd_status ;;
     logs)      cmd_logs ;;
     logs-err)  cmd_logs_err ;;
