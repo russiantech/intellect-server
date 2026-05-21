@@ -60,7 +60,7 @@ def _user_to_dict(user: User) -> dict:
         "roles": [r.name for r in user.roles], "primary_role": user.primary_role(),
         "bank_name": user.bank_name, "bank_account_number": user.bank_account_number,
         "bank_account_name": user.bank_account_name,
-        "active": user.is_active, "created_at": user.created_at,
+        "is_active": user.is_active, "created_at": user.created_at,
     }
 
 
