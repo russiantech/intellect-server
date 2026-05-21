@@ -50,13 +50,53 @@ cmd_stop() {
 
 # DEFAULT: Full restart. New master → fresh code from disk.
 # Use after: git pull, code edits, dependency changes, new endpoints.
+# cmd_restart() {
+#     section "Restarting ${APP_NAME} — FULL reload (new master, new code)"
+#     ensure_supervisor
+#     $SUPERVISORCTL restart "${APP_NAME}"
+#     sleep 3
+#     $SUPERVISORCTL status "${APP_NAME}"
+# }
+
+# v2
+# control.sh — replace cmd_restart()
+# Option 2: Fix control.sh restart to always be a cold restart
+# Change cmd_restart() in control.sh to kill the master PID explicitly before supervisor restart:
+
 cmd_restart() {
-    section "Restarting ${APP_NAME} — FULL reload (new master, new code)"
+    section "Restarting ${APP_NAME} — COLD restart (new master, new code from disk)"
     ensure_supervisor
-    $SUPERVISORCTL restart "${APP_NAME}"
+    
+    # Get current gunicorn master PID
+    local gpid
+    gpid=$($SUPERVISORCTL pid "${APP_NAME}" 2>/dev/null || echo "")
+    
+    # Stop via supervisor first (clean shutdown)
+    $SUPERVISORCTL stop "${APP_NAME}" 2>/dev/null || true
+    sleep 1
+    
+    # Hard-kill the master if it's still alive (prevents stale preload)
+    if [[ -n "$gpid" && "$gpid" =~ ^[0-9]+$ ]]; then
+        if kill -0 "$gpid" 2>/dev/null; then
+            warn "Killing stale gunicorn master PID $gpid"
+            kill -9 "$gpid" 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+    
+    # Kill any orphaned workers
+    pkill -9 -f "gunicorn.*${APP_NAME}" 2>/dev/null || true
+    
+    # Remove stale PID file if supervisor left one
+    local pid_file="${SUPERVISOR_DIR}/supervisord.pid"
+    [[ -f "$pid_file" ]] && rm -f "$pid_file"
+    
+    # Start fresh
+    $SUPERVISORCTL start "${APP_NAME}"
     sleep 3
     $SUPERVISORCTL status "${APP_NAME}"
 }
+
 
 # OPTIONAL: SIGHUP graceful. Same master, new workers. Same code.
 # Use for: worker refresh, memory cleanup, NOT for code deploys.

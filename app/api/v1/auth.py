@@ -229,13 +229,8 @@ async def signin(payload: SigninRequest, db: Session = Depends(get_db)):
     user = _resolve_user_by_identifier(db, payload.identifier)
 
     if not user or not verify_password(payload.password, user.password_hash):
-        # detail=f"Invalid email, username, phone or password. {user.password_hash}, {verify_password(payload.password, user.password_hash)}"
         detail=f"Invalid sign-in details. Make sure any of email, username, phone [{payload.identifier}] or password [{payload.password}] used is actually correct."
-        incoming_pass = hash_password(payload.password)
-        existing_pass = user.password_hash
-        print(f"{incoming_pass == existing_pass}")
-        print(f"{incoming_pass} VS {existing_pass}")
-        print(detail)
+
         raise HTTPException(status_code=401, detail=detail)
 
     if not user.email_verified:
