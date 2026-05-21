@@ -73,6 +73,7 @@ regenerate_configs() {
 
 full_restart() {
     section "Full restart (picks up code changes)"
+    bash "${DEPLOY_DIR}/redeploy.sh"
     bash "${DEPLOY_DIR}/control.sh" restart
 }
 
