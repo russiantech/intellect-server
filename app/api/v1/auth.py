@@ -11,7 +11,7 @@ import json
 import logging
 import secrets
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -26,14 +26,14 @@ from app.schemas import (
     ChangePasswordRequest, SuccessResponse,
 )
 from app.core.security.security import (
-    hash_password, verify_password,
+    create_access_token, hash_password, verify_password,
     decode_token,
 )
 from app.services.email_service import (
     send_verification_email, send_welcome_email,
     send_password_reset_email,
 )
-from app.api.deps.auth import get_current_user, bearer_scheme
+from app.api.deps.auth import ImpersonationError, can_impersonate, get_current_user, bearer_scheme, require_admin
 from app.api.deps.storage import get_redis_service
 from app.services.redis_service import RedisService
 from app.core.config import get_app_config
@@ -662,3 +662,118 @@ async def unlink_oauth(
     db.commit()
     return SuccessResponse(message=f"{provider.title()} account unlinked.")
 
+
+# 
+
+# app/api/v1/auth_impersonation.py
+# Admin impersonation endpoints — secure, audited, restricted
+
+# from datetime import datetime, timedelta, timezone
+# from typing import Optional
+# from fastapi import APIRouter, Depends, HTTPException
+# from sqlalchemy.orm import Session
+
+# from app.db.database import get_db
+# from app.models import User
+# from app.api.deps.auth import get_current_user, require_admin
+# from app.core.config import get_app_config
+# from app.core.security import create_access_token
+# import logging
+
+# router = APIRouter(prefix="/auth", tags=["Auth"])
+# logger = logging.getLogger(__name__)
+
+# Hard-coded super-admin email as requested
+# SUPER_ADMIN_EMAIL = "chrisjsmez@gmail.com"
+
+
+
+
+# def _can_impersonate(admin_user: User) -> bool:
+#     """Only the specific super-admin email can impersonate."""
+#     return admin_user.is_admin() and admin_user.email.lower() == SUPER_ADMIN_EMAIL.lower()
+
+
+# from app.utils.auth import ImpersonationError, _c
+
+@router.post("/impersonate/{user_id}")
+async def impersonate_user(
+    user_id: int,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin impersonation: generate a temporary access token for the target user.
+    Only available to the designated super-admin email.
+
+    Returns a token that the frontend can use to switch sessions.
+    The original admin token must be preserved client-side for reversion.
+    """
+    if not can_impersonate(admin):
+        raise ImpersonationError(
+            "Impersonation is restricted to the primary system administrator."
+        )
+
+    target = db.query(User).filter(User.id == user_id, User.is_active == True).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target user not found or inactive")
+
+    # Prevent impersonating another admin (security boundary)
+    if target.is_admin() and target.id != admin.id:
+        raise ImpersonationError("Cannot impersonate another administrator.")
+
+    # Audit log
+    logger.warning(
+        "IMPERSONATION: Admin %s (%s) is impersonating user %s (%s)",
+        admin.id, admin.email, target.id, target.email
+    )
+
+    # Generate a short-lived impersonation token (15 min)
+    impersonation_token = create_access_token(
+        data={
+            "sub": str(target.id),
+            "impersonated_by": str(admin.id),
+            "impersonated_by_email": admin.email,
+            "type": "impersonation",
+        },
+        expires_delta=timedelta(minutes=15),
+    )
+
+    return {
+        "token": impersonation_token,
+        "target_user": {
+            "id": target.id,
+            "name": target.name,
+            "email": target.email,
+            "username": target.username,
+            "roles": [r.name for r in target.roles],
+            "primary_role": target.primary_role(),
+        },
+        "impersonated_by": {
+            "id": admin.id,
+            "name": admin.name,
+            "email": admin.email,
+        },
+        "expires_in": 900,  # 15 minutes in seconds
+    }
+
+
+@router.post("/impersonate/revert")
+async def revert_impersonation(
+    user: User = Depends(get_current_user),
+):
+    """
+    Revert impersonation: returns confirmation.
+    The frontend swaps back to the stored original admin token.
+    """
+    # Audit log
+    if getattr(user, '_is_impersonating', False):
+        logger.info(
+            "IMPERSONATION REVERT: User %s reverting from impersonation by admin %s",
+            user.id, getattr(user, '_impersonated_by_id', 'unknown')
+        )
+
+    return {
+        "message": "Impersonation session ended. Restore your original admin token.",
+        "reverted": True,
+    }

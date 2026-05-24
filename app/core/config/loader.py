@@ -249,6 +249,10 @@ class ConfigLoader:
                 password_reset_token_expire_minutes=self._get("APP_PASSWORD_RESET_TOKEN_EXPIRE_MINUTES", 15, self._int),
                 email_verification_token_expire_minutes=self._get("APP_EMAIL_VERIFICATION_TOKEN_EXPIRE_MINUTES", 1440, self._int),
                 cors_allowed_origins=self._get("APP_ALLOWED_ORIGINS", ["http://localhost:5173"], self._list),
+                # Configurable list of super-admin emails (can impersonate / bypass some guards)
+                super_admin_emails=self._get("APP_SUPER_ADMIN_EMAILS", [], self._list),
+                signup_otp_ttl_seconds=self._get("APP_SIGNUP_OTP_TTL_SECONDS", 600, self._int),
+                password_reset_otp_ttl_seconds=self._get("APP_PASSWORD_RESET_OTP_TTL_SECONDS", 900, self._int),
             ),
             oauth_config=OAuthConfig(
                 google_client_id=self._get("APP_GOOGLE_CLIENT_ID"),

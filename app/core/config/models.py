@@ -113,7 +113,11 @@ class SecurityConfig(BaseModel):
     bcrypt_rounds: int = 12
     # cors_allowed_origins: List[str] = ["http://localhost:5173"]
     cors_allowed_origins: List[str] = Field(default_factory=lambda: ["http://localhost:5173"])
-    
+    super_admin_emails: List[str] = Field(default_factory=list)  # ← NEW: list of emails that can impersonate
+    # OTP settings
+    signup_otp_ttl_seconds: int = 600          # 10 min pending signup window
+    password_reset_otp_ttl_seconds: int = 900  # 15 min reset code
+
 
 
 class OAuthConfig(BaseModel):

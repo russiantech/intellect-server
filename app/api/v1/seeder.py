@@ -15,89 +15,89 @@
 #     )
 
 
-# # -----------------------------
-# # Data 
-# # -----------------------------
-# # course_data = {
-# #     "title": "Programming Fundamentals",
-# #     "lessons": [
-# #         {
-# #             "title": "Introduction to programming",
-# #             "topics": [
-# #                 "Problem solving test",
-# #                 "Programs",
-# #                 "Summary"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Storage",
-# #             "topics": [
-# #                 "Introduction to Storage",
-# #                 "Asking the computer to remember",
-# #                 "Variables",
-# #                 "Changing values",
-# #                 "Using variables",
-# #                 "Storing Text",
-# #                 "Lists",
-# #                 "Summary"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Repeating things",
-# #             "topics": [
-# #                 "Introduction to Repeating Things",
-# #                 "Where to use repeat?",
-# #                 "Loops",
-# #                 "While Loop",
-# #                 "Summary"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Making decisions",
-# #             "topics": [
-# #                 "Introduction to Making Decisions",
-# #                 "Using If..Then..Else",
-# #                 "Using Else If",
-# #                 "Summary"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Creating lists",
-# #             "topics": [
-# #                 "How to store multiple values",
-# #                 "Summary"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Grouping instructions",
-# #             "topics": [
-# #                 "Similar instructions",
-# #                 "Create group of instructions",
-# #                 "Procedures & Functions",
-# #                 "Let's revise"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Avoiding mistakes",
-# #             "topics": [
-# #                 "What are mistakes?",
-# #                 "What is debugging?",
-# #                 "Logic bug",
-# #                 "Avoiding bug",
-# #                 "Summary"
-# #             ]
-# #         },
-# #         {
-# #             "title": "Using computer language",
-# #             "topics": [
-# #                 "What is a computer language?",
-# #                 "Converting code to 0s and 1s",
-# #                 "Understanding code",
-# #                 "Let’s revise"
-# #             ]
-# #         }
-# #     ]
-# # }
+# -----------------------------
+# Data 
+# -----------------------------
+# course_data = {
+#     "title": "Programming Fundamentals",
+#     "lessons": [
+#         {
+#             "title": "Introduction to programming",
+#             "topics": [
+#                 "Problem solving test",
+#                 "Programs",
+#                 "Summary"
+#             ]
+#         },
+#         {
+#             "title": "Storage",
+#             "topics": [
+#                 "Introduction to Storage",
+#                 "Asking the computer to remember",
+#                 "Variables",
+#                 "Changing values",
+#                 "Using variables",
+#                 "Storing Text",
+#                 "Lists",
+#                 "Summary"
+#             ]
+#         },
+#         {
+#             "title": "Repeating things",
+#             "topics": [
+#                 "Introduction to Repeating Things",
+#                 "Where to use repeat?",
+#                 "Loops",
+#                 "While Loop",
+#                 "Summary"
+#             ]
+#         },
+#         {
+#             "title": "Making decisions",
+#             "topics": [
+#                 "Introduction to Making Decisions",
+#                 "Using If..Then..Else",
+#                 "Using Else If",
+#                 "Summary"
+#             ]
+#         },
+#         {
+#             "title": "Creating lists",
+#             "topics": [
+#                 "How to store multiple values",
+#                 "Summary"
+#             ]
+#         },
+#         {
+#             "title": "Grouping instructions",
+#             "topics": [
+#                 "Similar instructions",
+#                 "Create group of instructions",
+#                 "Procedures & Functions",
+#                 "Let's revise"
+#             ]
+#         },
+#         {
+#             "title": "Avoiding mistakes",
+#             "topics": [
+#                 "What are mistakes?",
+#                 "What is debugging?",
+#                 "Logic bug",
+#                 "Avoiding bug",
+#                 "Summary"
+#             ]
+#         },
+#         {
+#             "title": "Using computer language",
+#             "topics": [
+#                 "What is a computer language?",
+#                 "Converting code to 0s and 1s",
+#                 "Understanding code",
+#                 "Let’s revise"
+#             ]
+#         }
+#     ]
+# }
 
 # course_data = {
 #     "title": "Python For Artificial Intelligence",
@@ -250,7 +250,8 @@ from sqlalchemy.orm import Session
 # from app.db.session import SessionLocal  # adjust if your path differs
 
 from app.models import Course, Lesson, Topic
-from app.db.database import SessionLocal
+from app.db.database_0 import SessionLocal
+# from app.db.database import SessionLocal
 
 
 # -----------------------------
@@ -1248,7 +1249,7 @@ course_data_MongoDB={
   ]
 }
 
-course_data={
+course_data_Redis={
 "title": "Redis",
 "lessons": [
 {
@@ -1314,6 +1315,135 @@ course_data={
 }
 ]
 }
+
+course_data_Nodejs = {
+  
+  "title": "Node.js",
+  "lessons": [
+    {
+      "title": "Introduction to Node.js",
+      "topics": [
+        "What is Node.js?",
+        "History of node.js",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Let's get started",
+      "topics": [
+        "Your First Node Program",
+        "Components of Node.js",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Asynchronous & non-blocking",
+      "topics": [
+        "Non-blocking nature",
+        "Single-threaded",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Modules",
+      "topics": [
+        "What are modules?",
+        "Types of modules",
+        "How to use core modules?",
+        "How to use local module?",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Callback in Node",
+      "topics": [
+        "Callback functions",
+        "Let's do some coding",
+        "Let’s Revise"
+      ]
+    },
+    {
+      "title": "Streams",
+      "topics": [
+        "Introduction to streams",
+        "Event emitter in streams",
+        "Let's Revise"
+      ]
+    },
+    {
+      "title": "Node.js REST API",
+      "topics": [
+        "Introduction to REST",
+        "What is API?",
+        "Let’s Revise"
+      ]
+    }
+  ]
+}
+
+course_data = {
+"title": "Express JS",
+"lessons": [
+{
+"title": "Intro to the world of APIs and Frameworks",
+"topics": [
+"Understanding Frameworks",
+"Asynchronous nature of Express .Js",
+"Quiz time",
+]
+},
+{
+"title": "A look into the world of Express.Js",
+"topics": [
+"Achieving Acceleration",
+"A Deeper insight into APIs",
+"Summarization"
+]
+},
+{
+"title": "Enter the world of NPM and API",
+"topics": [
+"High speed express.Js features..",
+"To add more detailing to your setup",
+"A look upon what we have learned"
+]
+},
+
+{
+"title": "Apps and Functions",
+"topics": [
+"Basic Concepts",
+"Your 1st App",
+"Let’s Revise"
+]
+},
+{
+"title": "Routing",
+"topics": [
+"Calling and Initializing",
+"Route Parameters",
+"Let’s Revise"
+]
+},
+{
+"title": "Methods(Rest API)",
+"topics": [
+"Popular methods to keep in mind",
+"Additional methods under response object()",
+"Let’s Revise"
+]
+},
+{
+"title": "Static or Dynamic",
+"topics": [
+"The World of CSS,MVC & more",
+"Some additional important aspects!",
+"Let’s Revise"
+]
+}
+]
+}
+
 
 # -----------------------------
 # Seeder
