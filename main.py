@@ -21,13 +21,17 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_app_config
 from app.core.exceptions import setup_exception_handlers
-from app.core.performance.middleware import add_performance_middleware
+# from app.core.performance.middleware import add_performance_middleware
 
 app_config = get_app_config()
 LOG_LEVEL = logging.DEBUG if app_config.general_config.development_mode else logging.INFO
 LOG_DIR = os.environ.get("LOG_DIR", "/tmp/logs" if os.environ.get("VERCEL") else "logs")
 os.makedirs(LOG_DIR, exist_ok=True)
 
+
+# 
+# print(f"DEBUG api_url_override={app_config.hosting_config.api_url_override!r}")
+print(f"DEBUG computed api_url={app_config.hosting_config.api_url!r}")
 
 def setup_logging():
     root = logging.getLogger()
