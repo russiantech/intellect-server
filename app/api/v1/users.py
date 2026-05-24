@@ -18,7 +18,7 @@ from app.schemas import UserUpdateRequest, AdminUpdateUser
 from app.api.deps.auth import get_current_user, require_admin, optional_user
 from app.core.config import get_app_config
 from app.core.performance.cache_config import cache
-from app.api.v1.courses import _absolute_url
+from app.utils.helpers import _absolute_url
 from app.models.courses import Course, Topic
 from app.models.payments import Enrollment, EnrollmentStatus, PathEnrollment, Payment, PaymentStatus
 from app.models.quizzes import AttendanceRecord

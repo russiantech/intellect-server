@@ -37,11 +37,10 @@ from slugify import slugify
 from app.models import (
     Enrollment, Course, Payment, LearningPath, PathEnrollment,
     User, TutorAssignment,
-    path_category_assoc,
 )
 from app.models.payments import PaymentStatus, EnrollmentStatus
 from app.enums import CourseStatus
-from app.api.v1.courses import _absolute_url
+from app.utils.helpers import _absolute_url
 from app.api.v1.users import _avatar_url
 from app.schemas import DeenrollRequest, TutorAssignmentReview
 

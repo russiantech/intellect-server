@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Any
 from fastapi import Request
 from sqlalchemy import Enum
+from app.core.config import get_app_config
 from app.core.performance.cache_config import cache
 
 def generate_secure_code(length: int = 6) -> str:
@@ -91,3 +92,14 @@ def _invalidate_course_caches(course_id: int, slug: str = None) -> None:
         cache.delete(f"courses:detail:{slug}")
     cache.invalidate("courses:list")
 
+# 
+def _absolute_url(path, folder: str = "courses/thumbnails"):
+    if not path:
+        return None
+    if path.startswith("http"):
+        return path
+    cfg = get_app_config()
+    base = cfg.hosting_config.api_url.rstrip("/")
+    if path.startswith("/"):
+        return f"{base}{path}"
+    return f"{base}/uploads/{folder}/{path}"

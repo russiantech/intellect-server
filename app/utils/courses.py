@@ -57,13 +57,15 @@ from app.models.courses import ContentType as CT
 from app.core.config import get_app_config
 
 from app.models import (
-    Course, Lesson, Topic, TopicContent, Enrollment, User
+    Course, Lesson, Topic, TopicContent, 
+    Enrollment, User
 )
 
 from app.schemas import (
     SuccessResponse, 
     TopicTextContentCreate
 )
+from app.utils.helpers import _absolute_url
 
 logger = logging.getLogger(__name__)
 
@@ -167,18 +169,6 @@ def _make_content_token_url(content, user_id: int) -> str:
     api_prefix = os.environ.get("API_PREFIX", "/api/v1").rstrip("/")
 
     return f"{api_base}{api_prefix}/courses/serve/{token}"
-
-
-def _absolute_url(path, folder: str = "courses/thumbnails"):
-    if not path:
-        return None
-    if path.startswith("http"):
-        return path
-    cfg = get_app_config()
-    base = cfg.hosting_config.api_url.rstrip("/")
-    if path.startswith("/"):
-        return f"{base}{path}"
-    return f"{base}/uploads/{folder}/{path}"
 
 
 # ================================================================

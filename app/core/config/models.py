@@ -58,12 +58,15 @@ class HostingConfig(BaseModel):
     allowed_regexp: str = ""
     self_hosted: bool = True
     frontend_url: str = "http://localhost:5173"
+    api_url: Optional[str] = None  # ← NEW: override API URL if different from hosting URL
     cookie_config: CookieConfig = CookieConfig()
     content_delivery: ContentDeliveryConfig = ContentDeliveryConfig()
 
     @computed_field
     @property
     def api_url(self) -> str:
+        if self.api_url is not None:
+            return self.api_url
         scheme = "https" if self.ssl else "http"
         if (self.ssl and self.port == 443) or (not self.ssl and self.port == 80):
             return f"{scheme}://{self.domain}"

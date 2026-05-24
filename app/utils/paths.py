@@ -16,7 +16,7 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
-from app.api.v1.courses import _absolute_url  # shared URL resolver
+from app.utils.helpers import _absolute_url  # shared URL resolver
 from app.core.config import get_app_config
 from app.core.performance.cache_config import cache
 from app.models import (
