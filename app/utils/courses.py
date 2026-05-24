@@ -78,6 +78,11 @@ ALLOWED_MEDIA = {
     "audio/mpeg", "audio/wav",
 }
 
+_INTERVAL_LABELS = {
+    "weekly": "Weekly", "monthly": "Monthly",
+    "quarterly": "Quarterly", "yearly": "Yearly",
+}
+
 
 # ================================================================
 #  Signed content token helpers
@@ -687,11 +692,6 @@ def _course_dict(
 #
 # _course_dict is updated to include all fee columns so the frontend
 # pill-switcher can render the correct price for each option.
-
-_INTERVAL_LABELS = {
-    "weekly": "Weekly", "monthly": "Monthly",
-    "quarterly": "Quarterly", "yearly": "Yearly",
-}
 
 
 def _build_payment_types(course) -> list:
