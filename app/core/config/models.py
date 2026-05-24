@@ -49,6 +49,30 @@ class ContentDeliveryConfig(BaseModel):
     s3api: S3ApiConfig = S3ApiConfig()
 
 
+# class HostingConfig(BaseModel):
+#     domain: str = "localhost"
+#     ssl: bool = False
+#     port: int = 8000
+#     use_default_org: bool = True
+#     allowed_origins: List[str] = ["http://localhost:5173", "http://localhost:3000"]
+#     allowed_regexp: str = ""
+#     self_hosted: bool = True
+#     frontend_url: str = "http://localhost:5173"
+#     api_url: Optional[str] = None  # ← NEW: override API URL if different from hosting URL
+#     cookie_config: CookieConfig = CookieConfig()
+#     content_delivery: ContentDeliveryConfig = ContentDeliveryConfig()
+
+#     @computed_field
+#     @property
+#     def api_url(self) -> str:
+#         if self.api_url is not None:
+#             return self.api_url
+#         scheme = "https" if self.ssl else "http"
+#         if (self.ssl and self.port == 443) or (not self.ssl and self.port == 80):
+#             return f"{scheme}://{self.domain}"
+#         return f"{scheme}://{self.domain}:{self.port}"
+
+
 class HostingConfig(BaseModel):
     domain: str = "localhost"
     ssl: bool = False
@@ -58,20 +82,19 @@ class HostingConfig(BaseModel):
     allowed_regexp: str = ""
     self_hosted: bool = True
     frontend_url: str = "http://localhost:5173"
-    api_url: Optional[str] = None  # ← NEW: override API URL if different from hosting URL
+    _api_url: Optional[str] = None  # ← private: override source for computed field
     cookie_config: CookieConfig = CookieConfig()
     content_delivery: ContentDeliveryConfig = ContentDeliveryConfig()
 
     @computed_field
     @property
     def api_url(self) -> str:
-        if self.api_url is not None:
-            return self.api_url
+        if self._api_url is not None:
+            return self._api_url
         scheme = "https" if self.ssl else "http"
         if (self.ssl and self.port == 443) or (not self.ssl and self.port == 80):
             return f"{scheme}://{self.domain}"
         return f"{scheme}://{self.domain}:{self.port}"
-
 
 class DatabaseConfig(BaseModel):
     sql_connection_string: Optional[str] = None
