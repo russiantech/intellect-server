@@ -89,13 +89,27 @@ class HostingConfig(BaseModel):
 
     @computed_field
     @property
-    def api_url(self) -> str:
+    def api_url2(self) -> str:
         if self._api_url is not None:
             return self._api_url
         scheme = "https" if self.ssl else "http"
         if (self.ssl and self.port == 443) or (not self.ssl and self.port == 80):
             return f"{scheme}://{self.domain}"
         return f"{scheme}://{self.domain}:{self.port}"
+    
+    @computed_field
+    @property
+    def api_url(self) -> str:
+        # Check os.environ directly as a fallback — last resort, but guaranteed
+        import os
+        env_url = os.environ.get("APP_API_URL")
+        if env_url:
+            return env_url.rstrip("/")
+        scheme = "https" if self.ssl else "http"
+        if (self.ssl and self.port == 443) or (not self.ssl and self.port == 80):
+            return f"{scheme}://{self.domain}"
+        return f"{scheme}://{self.domain}:{self.port}"
+
 
 class DatabaseConfig(BaseModel):
     sql_connection_string: Optional[str] = None
