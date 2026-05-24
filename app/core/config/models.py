@@ -82,6 +82,7 @@ class HostingConfig(BaseModel):
     allowed_regexp: str = ""
     self_hosted: bool = True
     frontend_url: str = "http://localhost:5173"
+    # _api_url: Optional[str] = "https://intellect-api.salesnet.ng"  # ← private: override source for computed field
     _api_url: Optional[str] = None  # ← private: override source for computed field
     cookie_config: CookieConfig = CookieConfig()
     content_delivery: ContentDeliveryConfig = ContentDeliveryConfig()

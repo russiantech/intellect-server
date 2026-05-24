@@ -218,7 +218,7 @@ class ConfigLoader:
                 port=self._get("APP_PORT", 8000, self._int),
                 ssl=self._get("APP_SSL", False, self._bool),
                 frontend_url=self._get("APP_FRONTEND_URL", "http://localhost:5173"),
-                _api_url=self._get("APP_API_URL"),  # ← NEW: optional override
+                # _api_url=self._get("APP_API_URL"),  # ← NEW: optional override
                 content_delivery=ContentDeliveryConfig(
                     type=self._get("APP_CONTENT_DELIVERY_TYPE", "filesystem"),
                     filesystem_base_path=self._get("APP_FILESYSTEM_BASE_PATH", "./uploads"),

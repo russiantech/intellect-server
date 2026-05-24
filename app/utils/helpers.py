@@ -103,3 +103,5 @@ def _absolute_url(path, folder: str = "courses/thumbnails"):
     if path.startswith("/"):
         return f"{base}{path}"
     return f"{base}/uploads/{folder}/{path}"
+
+
