@@ -22,31 +22,72 @@ class CookieConfig(BaseModel):
     max_age: int = 60 * 60 * 24 * 7
 
 
-class S3ApiConfig(BaseModel):
+# class S3ApiConfig(BaseModel):
+#     bucket_name: Optional[str] = None
+#     endpoint_url: Optional[str] = None
+#     region: str = "us-east-1"
+#     access_key_id: Optional[str] = None
+#     secret_access_key: Optional[str] = None
+#     use_ssl: bool = True
+#     signature_version: str = "s3v4"
+
+# v2
+class S3Config(BaseModel):
     bucket_name: Optional[str] = None
     endpoint_url: Optional[str] = None
     region: str = "us-east-1"
     access_key_id: Optional[str] = None
     secret_access_key: Optional[str] = None
     use_ssl: bool = True
-    signature_version: str = "s3v4"
+
+class SupabaseStorageConfig(BaseModel):
+    url: Optional[str] = None
+    service_role_key: Optional[str] = None
+    bucket_name: str = "products"
+    public: bool = True
 
 
-class ContentDeliveryConfig(BaseModel):
-    type: Literal["filesystem", "s3api", "cloudinary"] = "filesystem"
+class CloudinaryConfig(BaseModel):
+    cloud_name: Optional[str] = None
+    api_key: Optional[str] = None
+    api_secret: Optional[str] = None
+    folder: str = "products"
+
+class StorageConfig(BaseModel):
+    """Single source of truth for file storage: where files live,
+    how they're validated, and provider-specific credentials.
+    Add new providers as sibling sub-models (s3, cloudinary, supabase, ...)."""
+    provider: Literal["filesystem", "s3", "supabase", "cloudinary"] = "supabase"
+
+    # Validation — applies regardless of provider
+    max_file_size_mb: int = 50
+    allowed_image_types: List[str] = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+    allowed_video_types: List[str] = ["video/mp4", "video/webm"]
+
+    # Filesystem provider
     filesystem_base_path: str = "./uploads"
-    max_file_size_mb: int = 500
-    allowed_file_types: List[str] = [
-        "video/mp4", "video/webm", "video/ogg",
-        "image/jpeg", "image/png", "image/gif", "image/webp",
-        "application/pdf",
-        "application/vnd.ms-powerpoint",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "audio/mpeg", "audio/wav",
-    ]
-    s3api: S3ApiConfig = S3ApiConfig()
+
+    # Provider-specific credentials
+    s3: S3Config = S3Config()
+    supabase: SupabaseStorageConfig = SupabaseStorageConfig()
+    cloudinary: CloudinaryConfig = CloudinaryConfig()
+
+
+# class ContentDeliveryConfig(BaseModel):
+#     type: Literal["filesystem", "s3api", "cloudinary"] = "filesystem"
+#     filesystem_base_path: str = "./uploads"
+#     max_file_size_mb: int = 500
+#     allowed_file_types: List[str] = [
+#         "video/mp4", "video/webm", "video/ogg",
+#         "image/jpeg", "image/png", "image/gif", "image/webp",
+#         "application/pdf",
+#         "application/vnd.ms-powerpoint",
+#         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+#         "application/msword",
+#         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+#         "audio/mpeg", "audio/wav",
+#     ]
+#     s3api: S3ApiConfig = S3ApiConfig()
 
 
 class HostingConfig(BaseModel):
@@ -61,7 +102,7 @@ class HostingConfig(BaseModel):
     # Proper field for override — loaded by loader.py like everything else
     api_url_override: Optional[str] = Field(default=None, alias="api_url")
     cookie_config: CookieConfig = CookieConfig()
-    content_delivery: ContentDeliveryConfig = ContentDeliveryConfig()
+    # content_delivery: ContentDeliveryConfig = ContentDeliveryConfig()
 
     @computed_field
     @property
@@ -264,6 +305,7 @@ class BackgroundTasksConfig(BaseModel):
 class AppConfig(BaseModel):
     general_config: GeneralConfig = GeneralConfig()
     hosting_config: HostingConfig = HostingConfig()
+    storage_config: StorageConfig = StorageConfig()
     database_config: DatabaseConfig = DatabaseConfig()
     redis_config: RedisConfig = RedisConfig()
     security_config: SecurityConfig

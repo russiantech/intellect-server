@@ -67,18 +67,18 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting %s API...", app_config.general_config.site_name)
-    
-    uploads_dir = os.path.abspath(app_config.hosting_config.content_delivery.filesystem_base_path)
-    for subdir in ("", "courses/thumbnails", "courses/content", "courses/previews", "avatars"):
-        os.makedirs(os.path.join(uploads_dir, subdir), exist_ok=True)
-    
+
     try:
         from app.db.database import create_tables
         create_tables()
         logger.info("Database tables verified.")
     except Exception as exc:
         logger.warning("Database setup issue: %s", exc)
-    
+
+    # NOTE: bucket provisioning is a one-off, run via a standalone script per
+    # environment (see storage_service.ensure_bucket_exists) — not here.
+    # Calling it every cold start just adds latency for nothing.
+
     try:
         from app.core.performance.cache_config import cache
         from app.services.redis_service import RedisService
@@ -87,26 +87,26 @@ async def lifespan(app: FastAPI):
         cache.init(_redis_for_cache)
     except Exception as exc:
         logger.warning("Cache init failed — falling back to in-memory LRU: %s", exc)
-    
+
     if not app_config.oauth_provider_config:
         logger.warning("No OAuth providers enabled.")
     else:
         logger.info("OAuth providers active: %s", list(app_config.oauth_provider_config.keys()))
-    
+
     yield
-    
+
     try:
         from app.db.database import close_db
         close_db()
     except Exception as exc:
         logger.warning("DB pool close error: %s", exc)
-    
+
     try:
         from app.core.performance.cache_config import cache
         cache.clear()
     except Exception:
         pass
-    
+
     logger.info("Shutdown complete.")
 
 
@@ -127,16 +127,9 @@ app = FastAPI(
 # ═══════════════════════════════════════════════════════════════════════════════
 # 2. STATIC FILES (mount before middleware so middleware can intercept)
 # ═══════════════════════════════════════════════════════════════════════════════
-
-_uploads_dir = os.path.abspath(app_config.hosting_config.content_delivery.filesystem_base_path)
-os.makedirs(_uploads_dir, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
-
-_static_dir = Path("static")
-_static_dir.mkdir(exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
-logger.info("Serving uploads from %s at /uploads", _uploads_dir)
-
+""" 
+Remove the whole /uploads mount and directory creation — files now live on Supabase/S3/Cloudinary and are served by public URLs, not by this API
+"""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. EXCEPTION HANDLERS (register early)

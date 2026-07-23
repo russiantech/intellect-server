@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.utils.helpers import _absolute_url  # shared URL resolver
 from app.core.config import get_app_config
 from app.core.performance.cache_config import cache
+from app.services.storage import upload_file
 from app.models import (
     Course,
     LearningPath,
@@ -31,10 +32,18 @@ from app.models import (
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# def _path_thumbnail_url(thumbnail: Optional[str]) -> Optional[str]:
+#     """Resolve a path thumbnail filename to its absolute URL."""
+#     return _absolute_url(thumbnail, "paths/thumbnails")
+# v2
+
 def _path_thumbnail_url(thumbnail: Optional[str]) -> Optional[str]:
     """Resolve a path thumbnail filename to its absolute URL."""
-    return _absolute_url(thumbnail, "paths/thumbnails")
-
+    if not thumbnail:
+        return None
+    if thumbnail.startswith("http"):
+        return thumbnail
+    return _absolute_url(thumbnail, "paths/thumbnails")  # legacy local rows, if any
 
 def _calculate_path_duration(path: LearningPath) -> int:
     """
@@ -110,19 +119,80 @@ _ALLOWED_IMAGE_TYPES: set[str] = {
 _ALLOWED_IMAGE_EXTS: set[str] = {"jpg", "jpeg", "png", "gif", "webp", "svg"}
 
 
+# async def _save_upload_file(
+#     file: UploadFile,
+#     *,
+#     subfolder: str,
+#     old_filename: Optional[str] = None,
+#     allowed_types: Optional[set[str]] = None,
+#     max_mb: int = 5,
+# ) -> str:
+#     """
+#     Persist an uploaded file under `<content_delivery_root>/<subfolder>/`.
+#     Returns the generated filename (not the full path).
+#     Deletes the previous file when `old_filename` is supplied and is a local
+#     reference (not an external URL).
+#     """
+#     if allowed_types and file.content_type not in allowed_types:
+#         raise HTTPException(
+#             status_code=400,
+#             detail=(
+#                 f"File type not allowed: {file.content_type}. "
+#                 f"Allowed: {', '.join(sorted(allowed_types))}"
+#             ),
+#         )
+
+#     cfg = get_app_config()
+#     upload_dir = os.path.join(
+#         cfg.hosting_config.content_delivery.filesystem_base_path,
+#         *subfolder.split("/"),
+#     )
+#     os.makedirs(upload_dir, exist_ok=True)
+
+#     raw_ext = (file.filename or "").rsplit(".", 1)
+#     ext = raw_ext[-1].lower() if len(raw_ext) == 2 else ""
+#     if ext not in _ALLOWED_IMAGE_EXTS:
+#         raise HTTPException(status_code=400, detail="Invalid file extension.")
+
+#     content = await file.read()
+#     max_bytes = max_mb * 1024 * 1024
+#     if len(content) > max_bytes:
+#         raise HTTPException(
+#             status_code=400, detail=f"File too large (max {max_mb} MB)."
+#         )
+
+#     filename = f"{uuid.uuid4().hex}.{ext}"
+#     filepath = os.path.join(upload_dir, filename)
+#     with open(filepath, "wb") as fh:
+#         fh.write(content)
+
+#     # Remove old file — non-fatal; never delete external URLs
+#     if old_filename and not old_filename.startswith("http"):
+#         old_path = os.path.join(upload_dir, old_filename)
+#         try:
+#             if os.path.isfile(old_path):
+#                 os.remove(old_path)
+#         except OSError:
+#             pass
+
+#     return filename
+
+# v2
+# from app.services.storage_service import upload_file
+
 async def _save_upload_file(
     file: UploadFile,
     *,
     subfolder: str,
-    old_filename: Optional[str] = None,
+    old_filename: Optional[str] = None,   # kept for signature compat; unused now
     allowed_types: Optional[set[str]] = None,
     max_mb: int = 5,
 ) -> str:
     """
-    Persist an uploaded file under `<content_delivery_root>/<subfolder>/`.
-    Returns the generated filename (not the full path).
-    Deletes the previous file when `old_filename` is supplied and is a local
-    reference (not an external URL).
+    Upload via the configured storage provider (supabase/s3/cloudinary).
+    Returns the resulting public URL (stored directly in the model — no
+    more filename-only storage, since there's no local path to resolve
+    against anymore).
     """
     if allowed_types and file.content_type not in allowed_types:
         raise HTTPException(
@@ -133,13 +203,6 @@ async def _save_upload_file(
             ),
         )
 
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        *subfolder.split("/"),
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
     raw_ext = (file.filename or "").rsplit(".", 1)
     ext = raw_ext[-1].lower() if len(raw_ext) == 2 else ""
     if ext not in _ALLOWED_IMAGE_EXTS:
@@ -148,26 +211,9 @@ async def _save_upload_file(
     content = await file.read()
     max_bytes = max_mb * 1024 * 1024
     if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=400, detail=f"File too large (max {max_mb} MB)."
-        )
+        raise HTTPException(status_code=400, detail=f"File too large (max {max_mb} MB).")
 
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    filepath = os.path.join(upload_dir, filename)
-    with open(filepath, "wb") as fh:
-        fh.write(content)
-
-    # Remove old file — non-fatal; never delete external URLs
-    if old_filename and not old_filename.startswith("http"):
-        old_path = os.path.join(upload_dir, old_filename)
-        try:
-            if os.path.isfile(old_path):
-                os.remove(old_path)
-        except OSError:
-            pass
-
-    return filename
-
+    return upload_file(content, file.filename, folder=subfolder)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Master serializer  (single source of truth — reused by every endpoint)

@@ -7,7 +7,7 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from slugify import slugify
 from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session, joinedload, subqueryload
@@ -21,6 +21,9 @@ from app.api.deps.auth import (
 )
 
 from app.core.performance.cache_config import cache
+from app.services.storage import create_signed_url
+
+from app.services.storage import upload_file, delete_file
 from app.core.config import get_app_config
 from app.db.database import get_db
 from app.models import (
@@ -72,20 +75,71 @@ logger = logging.getLogger(__name__)
 
 # ── Secure content serving ────────────────────────────────────────────────────
 
+# @router.get("/serve/{token}")
+# async def serve_content(
+#     token: str,
+#     db: Session = Depends(get_db),
+# ):
+#     """
+#     Token-gated file delivery.
+
+#     The client never sees the real filesystem path. The HMAC token is verified
+#     (signature + expiry + embedded user_id) before any file is read from disk.
+
+#     For production at scale, replace FileResponse with a redirect to a private
+#     S3/GCS pre-signed URL for zero-latency streaming without touching the app server.
+#     """
+#     content_id, user_id = _verify_content_token(token)
+
+#     tc = db.query(TopicContent).filter(TopicContent.id == content_id).first()
+#     if not tc:
+#         raise HTTPException(status_code=404, detail="Content not found")
+
+#     topic = db.query(Topic).filter(Topic.id == tc.topic_id).first()
+#     if not topic:
+#         raise HTTPException(status_code=404, detail="Topic not found")
+
+#     if not topic.is_free_preview:
+#         enrolled = db.query(Enrollment).filter(
+#             Enrollment.user_id == user_id,
+#             Enrollment.course_id == topic.course_id,
+#         ).first()
+#         user = db.query(User).filter(User.id == user_id).first()
+#         is_admin = user and user.is_admin()
+#         is_creator = topic.course and topic.course.creator_id == user_id
+#         if not enrolled and not is_admin and not is_creator:
+#             raise HTTPException(status_code=403, detail="Access denied")
+
+#     if tc.body is not None:
+#         return {"content_type": "text", "title": tc.title, "body": tc.body}
+
+#     if not tc.file_path:
+#         raise HTTPException(status_code=404, detail="No file attached to this content")
+
+#     cfg = get_app_config()
+#     file_path = os.path.join(
+#         cfg.hosting_config.content_delivery.filesystem_base_path,
+#         "courses", "content", tc.file_path,
+#     )
+#     if not os.path.exists(file_path):
+#         raise HTTPException(status_code=404, detail="File not found on server")
+
+#     return FileResponse(
+#         path=file_path,
+#         media_type=tc.mime_type or "application/octet-stream",
+#         filename=tc.title or tc.file_path,
+#         headers={
+#             "Cache-Control": "no-store, no-cache, must-revalidate, private",
+#             "Pragma": "no-cache",
+#             "X-Frame-Options": "SAMEORIGIN",
+#             "Content-Security-Policy": "default-src 'self'",
+#             "X-Content-Type-Options": "nosniff",
+#         },
+#     )
+
+# v2
 @router.get("/serve/{token}")
-async def serve_content(
-    token: str,
-    db: Session = Depends(get_db),
-):
-    """
-    Token-gated file delivery.
-
-    The client never sees the real filesystem path. The HMAC token is verified
-    (signature + expiry + embedded user_id) before any file is read from disk.
-
-    For production at scale, replace FileResponse with a redirect to a private
-    S3/GCS pre-signed URL for zero-latency streaming without touching the app server.
-    """
+async def serve_content(token: str, db: Session = Depends(get_db)):
     content_id, user_id = _verify_content_token(token)
 
     tc = db.query(TopicContent).filter(TopicContent.id == content_id).first()
@@ -98,8 +152,7 @@ async def serve_content(
 
     if not topic.is_free_preview:
         enrolled = db.query(Enrollment).filter(
-            Enrollment.user_id == user_id,
-            Enrollment.course_id == topic.course_id,
+            Enrollment.user_id == user_id, Enrollment.course_id == topic.course_id,
         ).first()
         user = db.query(User).filter(User.id == user_id).first()
         is_admin = user and user.is_admin()
@@ -113,14 +166,18 @@ async def serve_content(
     if not tc.file_path:
         raise HTTPException(status_code=404, detail="No file attached to this content")
 
+    # New cloud-stored content: file_path is the provider URL — sign + redirect.
+    # The HMAC token above is the entitlement check; this signed URL is the
+    # short-lived (5 min) transport layer so it can't be shared/cached.
+    if tc.file_path.startswith("http"):
+        signed = create_signed_url(tc.file_path, folder="courses/content", expires_in=300)
+        return RedirectResponse(url=signed, status_code=302)
+
+    # Legacy local-disk rows only (pre-migration) — unchanged behavior
     cfg = get_app_config()
-    file_path = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "content", tc.file_path,
-    )
+    file_path = os.path.join(cfg.storage_config.filesystem_base_path, "courses", "content", tc.file_path)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="File not found on server")
-
     return FileResponse(
         path=file_path,
         media_type=tc.mime_type or "application/octet-stream",
@@ -1211,6 +1268,54 @@ async def delete_course(course_id: int, db: Session = Depends(get_db)):
 
 # ── MEDIA UPLOAD ──────────────────────────────────────────────────────────────
 
+# @router.post("/{course_id}/upload-thumbnail")
+# async def upload_thumbnail(
+#     course_id: int,
+#     file: UploadFile = File(...),
+#     user: User = Depends(get_current_verified_user),
+#     db: Session = Depends(get_db),
+# ):
+#     course = db.query(Course).filter(Course.id == course_id).first()
+#     if not course:
+#         raise HTTPException(status_code=404, detail="Course not found")
+#     if course.creator_id != user.id and not user.is_admin():
+#         raise HTTPException(status_code=403, detail="Access denied")
+
+#     cfg = get_app_config()
+#     upload_dir = os.path.join(
+#         cfg.hosting_config.content_delivery.filesystem_base_path,
+#         "courses", "thumbnails",
+#     )
+#     os.makedirs(upload_dir, exist_ok=True)
+
+#     ext = file.filename.rsplit(".", 1)[-1].lower()
+#     filename = f"{uuid.uuid4().hex}.{ext}"
+#     content = await file.read()
+
+#     with open(os.path.join(upload_dir, filename), "wb") as fh:
+#         fh.write(content)
+
+#     # Remove old file (non-fatal)
+#     if course.thumbnail and not course.thumbnail.startswith("http"):
+#         old_path = os.path.join(upload_dir, course.thumbnail)
+#         try:
+#             if os.path.isfile(old_path):
+#                 os.remove(old_path)
+#         except OSError:
+#             pass
+
+#     course.thumbnail = filename
+#     db.commit()
+
+#     # Thumbnail URL is part of the cached course struct
+#     _invalidate_course_caches(course_id, slug=course.slug)
+
+#     return {
+#         "thumbnail": filename,
+#         "url": _absolute_url(filename, "courses/thumbnails"),
+#     }
+
+
 @router.post("/{course_id}/upload-thumbnail")
 async def upload_thumbnail(
     course_id: int,
@@ -1224,41 +1329,136 @@ async def upload_thumbnail(
     if course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
 
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "thumbnails",
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext = file.filename.rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
     content = await file.read()
+    url = upload_file(content, file.filename, folder="courses/thumbnails")
 
-    with open(os.path.join(upload_dir, filename), "wb") as fh:
-        fh.write(content)
+    if course.thumbnail:
+        delete_file(course.thumbnail, folder="courses/thumbnails")
 
-    # Remove old file (non-fatal)
-    if course.thumbnail and not course.thumbnail.startswith("http"):
-        old_path = os.path.join(upload_dir, course.thumbnail)
-        try:
-            if os.path.isfile(old_path):
-                os.remove(old_path)
-        except OSError:
-            pass
-
-    course.thumbnail = filename
+    course.thumbnail = url
     db.commit()
-
-    # Thumbnail URL is part of the cached course struct
     _invalidate_course_caches(course_id, slug=course.slug)
 
-    return {
-        "thumbnail": filename,
-        "url": _absolute_url(filename, "courses/thumbnails"),
-    }
+    return {"thumbnail": url, "url": url}
 
 
+# @router.post("/{course_id}/topics/{topic_id}/upload-content")
+# async def upload_topic_content(
+#     course_id: int,
+#     topic_id: int,
+#     file: UploadFile = File(...),
+#     content_type_hint: Optional[str] = Query(None),
+#     user: User = Depends(get_current_verified_user),
+#     db: Session = Depends(get_db),
+# ):
+#     topic = db.query(Topic).filter(
+#         Topic.id == topic_id, Topic.course_id == course_id,
+#     ).first()
+#     if not topic:
+#         raise HTTPException(status_code=404, detail="Topic not found")
+
+#     course = topic.course
+#     if course.creator_id != user.id and not user.is_admin():
+#         raise HTTPException(status_code=403, detail="Access denied")
+
+#     if file.content_type not in ALLOWED_MEDIA:
+#         raise HTTPException(
+#             status_code=400, detail=f"File type not allowed: {file.content_type}"
+#         )
+
+#     cfg = get_app_config()
+#     upload_dir = os.path.join(
+#         cfg.hosting_config.content_delivery.filesystem_base_path,
+#         "courses", "content",
+#     )
+#     os.makedirs(upload_dir, exist_ok=True)
+
+#     ext = file.filename.rsplit(".", 1)[-1].lower()
+#     filename = f"{uuid.uuid4().hex}.{ext}"
+#     content = await file.read()
+
+#     max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
+#     if len(content) > max_bytes:
+#         raise HTTPException(status_code=400, detail="File too large")
+
+#     with open(os.path.join(upload_dir, filename), "wb") as fh:
+#         fh.write(content)
+
+#     mime = file.content_type
+#     from app.models.courses import ContentType as CT_model
+#     if "video" in mime:        ct = CT_model.video
+#     elif "pdf" in mime:        ct = CT_model.pdf
+#     elif "image" in mime:      ct = CT_model.image
+#     elif "powerpoint" in mime or "presentation" in mime: ct = CT_model.ppt
+#     elif "audio" in mime:      ct = CT_model.audio
+#     else:                      ct = CT_model.doc
+
+#     tc = TopicContent(
+#         title=file.filename, content_type=ct,
+#         file_path=filename, mime_type=mime,
+#         file_size_bytes=len(content),
+#         topic_id=topic_id,
+#         order_index=len(topic.contents),
+#     )
+#     db.add(tc)
+#     db.commit()
+#     db.refresh(tc)
+
+#     # New content item changes contents_count in the cached struct
+#     _invalidate_course_caches(course_id, slug=course.slug)
+
+#     return {
+#         "id": tc.id,
+#         "title": file.filename,
+#         "content_type": ct,
+#         "url": _make_content_token_url(tc, user.id),
+#         "mime_type": mime,
+#         "order_index": tc.order_index,
+#     }
+
+
+# @router.delete("/{course_id}/topics/{topic_id}/content/{content_id}")
+# async def delete_topic_content(
+#     course_id: int,
+#     topic_id: int,
+#     content_id: int,
+#     user: User = Depends(get_current_verified_user),
+#     db: Session = Depends(get_db),
+# ):
+#     """Delete a single content item from a topic."""
+#     tc = db.query(TopicContent).filter(
+#         TopicContent.id == content_id,
+#         TopicContent.topic_id == topic_id,
+#     ).first()
+#     if not tc:
+#         raise HTTPException(status_code=404, detail="Content not found")
+
+#     topic = db.query(Topic).filter(
+#         Topic.id == topic_id, Topic.course_id == course_id,
+#     ).first()
+#     if not topic:
+#         raise HTTPException(status_code=404, detail="Topic not found")
+
+#     if topic.course.creator_id != user.id and not user.is_admin():
+#         raise HTTPException(status_code=403, detail="Access denied")
+
+#     if tc.file_path:
+#         cfg = get_app_config()
+#         full_path = os.path.join(
+#             cfg.hosting_config.content_delivery.filesystem_base_path,
+#             "courses", "content", tc.file_path,
+#         )
+#         if os.path.exists(full_path):
+#             os.remove(full_path)
+
+#     db.delete(tc)
+#     db.commit()
+
+#     _invalidate_course_caches(course_id, slug=topic.course.slug)
+#     return SuccessResponse(message="Content deleted")
+
+
+# v2
 @router.post("/{course_id}/topics/{topic_id}/upload-content")
 async def upload_topic_content(
     course_id: int,
@@ -1268,109 +1468,64 @@ async def upload_topic_content(
     user: User = Depends(get_current_verified_user),
     db: Session = Depends(get_db),
 ):
-    topic = db.query(Topic).filter(
-        Topic.id == topic_id, Topic.course_id == course_id,
-    ).first()
+    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
-
     course = topic.course
     if course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
-
     if file.content_type not in ALLOWED_MEDIA:
-        raise HTTPException(
-            status_code=400, detail=f"File type not allowed: {file.content_type}"
-        )
+        raise HTTPException(status_code=400, detail=f"File type not allowed: {file.content_type}")
 
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path,
-        "courses", "content",
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext = file.filename.rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
     content = await file.read()
-
-    max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
+    cfg = get_app_config()
+    max_bytes = cfg.storage_config.max_file_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise HTTPException(status_code=400, detail="File too large")
 
-    with open(os.path.join(upload_dir, filename), "wb") as fh:
-        fh.write(content)
+    url = upload_file(content, file.filename, folder="courses/content")
 
     mime = file.content_type
     from app.models.courses import ContentType as CT_model
-    if "video" in mime:        ct = CT_model.video
-    elif "pdf" in mime:        ct = CT_model.pdf
-    elif "image" in mime:      ct = CT_model.image
+    if "video" in mime: ct = CT_model.video
+    elif "pdf" in mime: ct = CT_model.pdf
+    elif "image" in mime: ct = CT_model.image
     elif "powerpoint" in mime or "presentation" in mime: ct = CT_model.ppt
-    elif "audio" in mime:      ct = CT_model.audio
-    else:                      ct = CT_model.doc
+    elif "audio" in mime: ct = CT_model.audio
+    else: ct = CT_model.doc
 
     tc = TopicContent(
         title=file.filename, content_type=ct,
-        file_path=filename, mime_type=mime,
+        file_path=url, mime_type=mime,           # file_path now holds the URL
         file_size_bytes=len(content),
-        topic_id=topic_id,
-        order_index=len(topic.contents),
+        topic_id=topic_id, order_index=len(topic.contents),
     )
-    db.add(tc)
-    db.commit()
-    db.refresh(tc)
-
-    # New content item changes contents_count in the cached struct
+    db.add(tc); db.commit(); db.refresh(tc)
     _invalidate_course_caches(course_id, slug=course.slug)
 
     return {
-        "id": tc.id,
-        "title": file.filename,
-        "content_type": ct,
-        "url": _make_content_token_url(tc, user.id),
-        "mime_type": mime,
-        "order_index": tc.order_index,
+        "id": tc.id, "title": file.filename, "content_type": ct,
+        "url": url, "mime_type": mime, "order_index": tc.order_index,
     }
-
 
 @router.delete("/{course_id}/topics/{topic_id}/content/{content_id}")
 async def delete_topic_content(
-    course_id: int,
-    topic_id: int,
-    content_id: int,
-    user: User = Depends(get_current_verified_user),
-    db: Session = Depends(get_db),
-):
-    """Delete a single content item from a topic."""
-    tc = db.query(TopicContent).filter(
-        TopicContent.id == content_id,
-        TopicContent.topic_id == topic_id,
-    ).first()
+    course_id: int, topic_id: int, content_id: int,
+        user: User = Depends(get_current_verified_user),
+        db: Session = Depends(get_db)):
+    tc = db.query(TopicContent).filter(TopicContent.id == content_id, TopicContent.topic_id == topic_id).first()
     if not tc:
         raise HTTPException(status_code=404, detail="Content not found")
-
-    topic = db.query(Topic).filter(
-        Topic.id == topic_id, Topic.course_id == course_id,
-    ).first()
+    topic = db.query(Topic).filter(Topic.id == topic_id, Topic.course_id == course_id).first()
     if not topic:
         raise HTTPException(status_code=404, detail="Topic not found")
-
     if topic.course.creator_id != user.id and not user.is_admin():
         raise HTTPException(status_code=403, detail="Access denied")
 
     if tc.file_path:
-        cfg = get_app_config()
-        full_path = os.path.join(
-            cfg.hosting_config.content_delivery.filesystem_base_path,
-            "courses", "content", tc.file_path,
-        )
-        if os.path.exists(full_path):
-            os.remove(full_path)
+        delete_file(tc.file_path, folder="courses/content")
 
-    db.delete(tc)
-    db.commit()
-
+    db.delete(tc); db.commit()
     _invalidate_course_caches(course_id, slug=topic.course.slug)
     return SuccessResponse(message="Content deleted")
 

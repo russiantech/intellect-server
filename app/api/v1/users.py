@@ -18,6 +18,7 @@ from app.schemas import UserUpdateRequest, AdminUpdateUser
 from app.api.deps.auth import get_current_user, require_admin, optional_user
 from app.core.config import get_app_config
 from app.core.performance.cache_config import cache
+from app.services.storage import upload_file, delete_file
 from app.utils.helpers import _absolute_url
 from app.models.courses import Course, Topic
 from app.models.payments import Enrollment, EnrollmentStatus, PathEnrollment, Payment, PaymentStatus
@@ -36,14 +37,25 @@ _INSTRUCTORS_CACHE_TTL = 300       # 5 min — public instructor listing
 _PUBLIC_PROFILE_TTL = 600          # 10 min — public profile pages
 
 
+# def _avatar_url(path: Optional[str]) -> Optional[str]:
+#     if not path:
+#         return None
+#     if path.startswith("http"):
+#         return path
+#     cfg = get_app_config()
+#     base = cfg.hosting_config.api_url.rstrip("/")
+#     return f"{base}/uploads/avatars/{path}"
+
+# v2
+
 def _avatar_url(path: Optional[str]) -> Optional[str]:
     if not path:
         return None
     if path.startswith("http"):
         return path
+    # legacy local rows only
     cfg = get_app_config()
-    base = cfg.hosting_config.api_url.rstrip("/")
-    return f"{base}/uploads/avatars/{path}"
+    return f"{cfg.hosting_config.api_url.rstrip('/')}/uploads/avatars/{path}"
 
 
 def _user_to_dict(user: User) -> dict:
@@ -209,6 +221,52 @@ async def update_profile(
     return _user_to_dict(user)
 
 
+# @router.post("/profile/avatar")
+# async def upload_avatar(
+#     file: UploadFile = File(...),
+#     user: User = Depends(get_current_user),
+#     db: Session = Depends(get_db),
+# ):
+#     if file.content_type not in ALLOWED_IMAGE_TYPES:
+#         raise HTTPException(status_code=400, detail="Only image files are allowed")
+
+#     cfg = get_app_config()
+#     upload_dir = os.path.join(
+#         cfg.hosting_config.content_delivery.filesystem_base_path, "avatars"
+#     )
+#     os.makedirs(upload_dir, exist_ok=True)
+
+#     ext = file.filename.rsplit(".", 1)[-1].lower()
+#     filename = f"{uuid.uuid4().hex}.{ext}"
+#     filepath = os.path.join(upload_dir, filename)
+
+#     content = await file.read()
+#     max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
+#     if len(content) > max_bytes:
+#         raise HTTPException(status_code=400, detail="File too large")
+
+#     with open(filepath, "wb") as f:
+#         f.write(content)
+
+#     # Remove old file (non-fatal)
+#     if user.image and user.image != "default.svg":
+#         old = os.path.join(upload_dir, user.image)
+#         if os.path.exists(old):
+#             os.remove(old)
+
+#     user.image = filename
+#     db.commit()
+
+#     # Avatar changed — invalidate public profile and instructor listing caches
+#     cache.delete(f"users:public:{user.username.lower()}")
+#     cache.invalidate("users:instructors")
+
+#     return {
+#         "image": _avatar_url(filename),
+#         "url": _avatar_url(filename),
+#     }
+
+# v2
 @router.post("/profile/avatar")
 async def upload_avatar(
     file: UploadFile = File(...),
@@ -218,42 +276,28 @@ async def upload_avatar(
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(status_code=400, detail="Only image files are allowed")
 
-    cfg = get_app_config()
-    upload_dir = os.path.join(
-        cfg.hosting_config.content_delivery.filesystem_base_path, "avatars"
-    )
-    os.makedirs(upload_dir, exist_ok=True)
-
-    ext = file.filename.rsplit(".", 1)[-1].lower()
-    filename = f"{uuid.uuid4().hex}.{ext}"
-    filepath = os.path.join(upload_dir, filename)
-
     content = await file.read()
-    max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
+    cfg = get_app_config()
+    max_bytes = cfg.storage_config.max_file_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise HTTPException(status_code=400, detail="File too large")
 
-    with open(filepath, "wb") as f:
-        f.write(content)
+    url = upload_file(content, file.filename, folder="avatars")
 
-    # Remove old file (non-fatal)
     if user.image and user.image != "default.svg":
-        old = os.path.join(upload_dir, user.image)
-        if os.path.exists(old):
-            os.remove(old)
+        delete_file(user.image, folder="avatars")
 
-    user.image = filename
+    user.image = url
     db.commit()
 
-    # Avatar changed — invalidate public profile and instructor listing caches
     cache.delete(f"users:public:{user.username.lower()}")
     cache.invalidate("users:instructors")
 
-    return {
-        "image": _avatar_url(filename),
-        "url": _avatar_url(filename),
-    }
-
+    return { "image": url, "url": url }
+    # return {
+    #     "image": _avatar_url(url),
+    #     "url": _avatar_url(url),
+    # }
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ADMIN ENDPOINTS
