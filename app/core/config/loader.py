@@ -207,7 +207,21 @@ class ConfigLoader:
         
         if not secret:
             raise ValueError("APP_AUTH_JWT_SECRET_KEY is required in .env")
-  
+    
+        # Storage provider: defaults to local filesystem (cPanel/VPS-style hosts),
+        # but serverless hosts (Vercel) CANNOT use filesystem — it's read-only
+        # outside /tmp and non-persistent even there. Enforce this regardless of
+        # what APP_STORAGE_PROVIDER is set to, so a missing/wrong env var on
+        # Vercel can't silently try to write to disk and fail at request time.
+        _storage_provider = self._get("APP_STORAGE_PROVIDER", "filesystem")
+        if self._get("VERCEL") and _storage_provider == "filesystem":
+            logger.warning(
+                "APP_STORAGE_PROVIDER='filesystem' is invalid on Vercel — "
+                "forcing 'supabase'. Set APP_STORAGE_PROVIDER=supabase explicitly "
+                "in Vercel env vars to remove this warning."
+            )
+            _storage_provider = "supabase"
+            
         return AppConfig(
 
             general_config=GeneralConfig(
@@ -240,7 +254,7 @@ class ConfigLoader:
                 
             storage_config=StorageConfig(
                 
-                provider=self._get("APP_STORAGE_PROVIDER", "supabase"),
+                provider=_storage_provider,
                 
                 # max_file_size_mb=self._int("APP_MAX_FILE_SIZE_MB", 50),
                 max_file_size_mb=self._get("APP_MAX_FILE_SIZE_MB", 50, self._int),

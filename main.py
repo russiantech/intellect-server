@@ -130,6 +130,24 @@ app = FastAPI(
 """ 
 Remove the whole /uploads mount and directory creation — files now live on Supabase/S3/Cloudinary and are served by public URLs, not by this API
 """
+# ═══════════════════════════════════════════════════════════════════════════════
+# 2. STATIC FILES
+# ═══════════════════════════════════════════════════════════════════════════════
+# /uploads is only mounted on hosts with a writable, persistent filesystem
+# (cPanel/VPS/Docker). Serverless hosts (Vercel, etc.) skip this — their
+# filesystem is read-only outside /tmp and non-persistent even there, so
+# uploads on those hosts must go through the configured cloud provider
+# (app/services/storage.py) and are served directly from the provider's URL,
+# never through this app.
+_uploads_dir = os.path.abspath(app_config.storage_config.filesystem_base_path)
+if not os.environ.get("VERCEL"):
+    os.makedirs(_uploads_dir, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+    logger.info("Serving uploads from %s at /uploads", _uploads_dir)
+
+_static_dir = Path("static")
+_static_dir.mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(_static_dir)), name="static")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. EXCEPTION HANDLERS (register early)
