@@ -1,3 +1,7 @@
+# app/db/database.py
+"""
+Database setup and session management.
+"""
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from sqlalchemy.pool import QueuePool

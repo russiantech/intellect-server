@@ -74,69 +74,6 @@ logger = logging.getLogger(__name__)
 
 
 # ── Secure content serving ────────────────────────────────────────────────────
-
-# @router.get("/serve/{token}")
-# async def serve_content(
-#     token: str,
-#     db: Session = Depends(get_db),
-# ):
-#     """
-#     Token-gated file delivery.
-
-#     The client never sees the real filesystem path. The HMAC token is verified
-#     (signature + expiry + embedded user_id) before any file is read from disk.
-
-#     For production at scale, replace FileResponse with a redirect to a private
-#     S3/GCS pre-signed URL for zero-latency streaming without touching the app server.
-#     """
-#     content_id, user_id = _verify_content_token(token)
-
-#     tc = db.query(TopicContent).filter(TopicContent.id == content_id).first()
-#     if not tc:
-#         raise HTTPException(status_code=404, detail="Content not found")
-
-#     topic = db.query(Topic).filter(Topic.id == tc.topic_id).first()
-#     if not topic:
-#         raise HTTPException(status_code=404, detail="Topic not found")
-
-#     if not topic.is_free_preview:
-#         enrolled = db.query(Enrollment).filter(
-#             Enrollment.user_id == user_id,
-#             Enrollment.course_id == topic.course_id,
-#         ).first()
-#         user = db.query(User).filter(User.id == user_id).first()
-#         is_admin = user and user.is_admin()
-#         is_creator = topic.course and topic.course.creator_id == user_id
-#         if not enrolled and not is_admin and not is_creator:
-#             raise HTTPException(status_code=403, detail="Access denied")
-
-#     if tc.body is not None:
-#         return {"content_type": "text", "title": tc.title, "body": tc.body}
-
-#     if not tc.file_path:
-#         raise HTTPException(status_code=404, detail="No file attached to this content")
-
-#     cfg = get_app_config()
-#     file_path = os.path.join(
-#         cfg.hosting_config.content_delivery.filesystem_base_path,
-#         "courses", "content", tc.file_path,
-#     )
-#     if not os.path.exists(file_path):
-#         raise HTTPException(status_code=404, detail="File not found on server")
-
-#     return FileResponse(
-#         path=file_path,
-#         media_type=tc.mime_type or "application/octet-stream",
-#         filename=tc.title or tc.file_path,
-#         headers={
-#             "Cache-Control": "no-store, no-cache, must-revalidate, private",
-#             "Pragma": "no-cache",
-#             "X-Frame-Options": "SAMEORIGIN",
-#             "Content-Security-Policy": "default-src 'self'",
-#             "X-Content-Type-Options": "nosniff",
-#         },
-#     )
-
 # v2
 @router.get("/serve/{token}")
 async def serve_content(token: str, db: Session = Depends(get_db)):
@@ -484,161 +421,6 @@ async def get_lesson_assessments(
 
 
 # ── PUBLIC BROWSE ─────────────────────────────────────────────────────────────
-
-# @router.get("/")
-# async def list_courses(
-#     page: int = Query(1, ge=1),
-#     per_page: int = Query(20, ge=1, le=100),
-#     search: Optional[str] = None,
-#     category: Optional[str] = None,
-#     level: Optional[str] = None,
-#     payment_type: Optional[str] = None,
-#     featured: Optional[bool] = None,
-#     status: Optional[str] = "published",
-#     creator_id: Optional[int] = None,
-#     sort: Optional[str] = "newest",
-#     db: Session = Depends(get_db),
-#     current_user: Optional[User] = Depends(optional_user),
-# ):
-#     """
-#     Public course listing with filtering, pagination, and sorting.
-
-#     Cache strategy:
-#       - Anonymous requests are cached for 5 minutes, keyed on all query params.
-#         All filter combinations are independently cached — a search for "python"
-#         is a different key from no search.
-#       - Authenticated requests are never cached because _course_dict includes
-#         per-user is_enrolled and progress_pct, which differ between users.
-#       - Invalidated by: course publish, update, approve, delete, create.
-#     """
-#     # ── Cache check (anonymous only) ──────────────────────────────
-#     cache_key: Optional[str] = None
-#     if current_user is None:
-#         cache_key = cache.make_key(
-#             "courses:list",
-#             page, per_page, search, category, level,
-#             payment_type, featured, status, creator_id, sort,
-#         )
-#         hit = cache.get(cache_key)
-#         if hit is not None:
-#             return hit
-
-#     # ── Build filtered query ──────────────────────────────────────
-#     def _apply_filters(q):
-#         if status:
-#             q = q.filter(Course.status == status)
-#         if search:
-#             q = q.filter(or_(
-#                 Course.title.ilike(f"%{search}%"),
-#                 Course.description.ilike(f"%{search}%"),
-#             ))
-#         if category:
-#             raw = [s.strip() for s in category.split(",") if s.strip()]
-#             if raw:
-#                 try:
-#                     cat_ids = [int(c) for c in raw]
-#                     cat_sq = (
-#                         db.query(Course.id)
-#                         .join(Course.categories)
-#                         .filter(Category.id.in_(cat_ids))
-#                         .subquery()
-#                     )
-#                     q = q.filter(Course.id.in_(cat_sq))
-#                 except ValueError:
-#                     cat_sq = (
-#                         db.query(Course.id)
-#                         .join(Course.categories)
-#                         .filter(Category.slug.in_(raw))
-#                         .subquery()
-#                     )
-#                     q = q.filter(Course.id.in_(cat_sq))
-#         if level:
-#             raw_levels = [s.strip() for s in level.split(",") if s.strip()]
-#             if raw_levels:
-#                 q = q.filter(Course.level.in_(raw_levels))
-#         if payment_type:
-#             raw_types = [s.strip() for s in payment_type.split(",") if s.strip()]
-#             if raw_types:
-#                 q = q.filter(Course.payment_type.in_(raw_types))
-#         if featured is not None:
-#             q = q.filter(Course.featured == featured)
-#         if creator_id:
-#             q = q.filter(Course.creator_id == creator_id)
-#         return q
-
-#     # ── Count ─────────────────────────────────────────────────────
-#     count_q = _apply_filters(db.query(Course.id))
-#     if sort == "rating":
-#         count_q = count_q.outerjoin(Course.feedbacks).group_by(Course.id)
-#     total = count_q.count()
-
-#     if total == 0:
-#         empty = {"items": [], "total": 0, "page": page, "per_page": per_page, "pages": 0}
-#         if cache_key:
-#             cache.set(cache_key, empty, ttl=300)
-#         return empty
-
-#     # ── Paginate ──────────────────────────────────────────────────
-#     if sort == "popular":
-#         page_q = _apply_filters(
-#             db.query(Course.id, Course.views)
-#         ).order_by(Course.views.desc(), Course.id)
-#     elif sort == "rating":
-#         avg_rating = func.coalesce(func.avg(Feedback.rating), 0).label("avg_rating")
-#         page_q = (
-#             _apply_filters(db.query(Course.id, avg_rating))
-#             .outerjoin(Course.feedbacks)
-#             .group_by(Course.id)
-#             .order_by(avg_rating.desc(), Course.id)
-#         )
-#     else:
-#         page_q = _apply_filters(
-#             db.query(Course.id, Course.created_at)
-#         ).order_by(Course.created_at.desc(), Course.id)
-
-#     rows = page_q.offset((page - 1) * per_page).limit(per_page).all()
-#     matching_ids = [r[0] for r in rows]
-
-#     if not matching_ids:
-#         partial = {
-#             "items": [], "total": total, "page": page,
-#             "per_page": per_page,
-#             "pages": (total + per_page - 1) // per_page,
-#         }
-#         if cache_key:
-#             cache.set(cache_key, partial, ttl=300)
-#         return partial
-
-#     # ── Fetch full objects (all relations in one query) ───────────
-#     order_map = case({id_: idx for idx, id_ in enumerate(matching_ids)}, value=Course.id)
-#     courses = (
-#         db.query(Course)
-#         .options(
-#             subqueryload(Course.categories),
-#             subqueryload(Course.tags),
-#             joinedload(Course.creator),
-#             subqueryload(Course.enrollments),
-#             subqueryload(Course.feedbacks),
-#         )
-#         .filter(Course.id.in_(matching_ids))
-#         .order_by(order_map)
-#         .all()
-#     )
-
-#     response = {
-#         "items": [_course_dict(c, current_user) for c in courses],
-#         "total": total,
-#         "page": page,
-#         "per_page": per_page,
-#         "pages": (total + per_page - 1) // per_page,
-#     }
-
-#     # ── Store anonymous response in cache ─────────────────────────
-#     if cache_key:
-#         cache.set(cache_key, _to_cacheable(response), ttl=300)
-
-#     return response
-
 # v2
 @router.get("/")
 async def list_courses(
@@ -668,60 +450,139 @@ async def list_courses(
             return hit
 
     # ── Build filtered query ──────────────────────────────────────
+    # def _apply_filters(q):
+    #     if status:
+    #         q = q.filter(Course.status == status)
+    #     if search:
+    #         q = q.filter(or_(
+    #             Course.title.ilike(f"%{search}%"),
+    #             Course.description.ilike(f"%{search}%"),
+    #         ))
+
+    #     # if category:
+    #     #     raw = [s.strip() for s in category.split(",") if s.strip()]
+    #     #     if raw:
+    #     #         try:
+    #     #             cat_ids = [int(c) for c in raw]
+                    
+    #     #             # cat_sq = (
+    #     #             #     db.query(Course.id)
+    #     #             #     .join(Course.categories)
+    #     #             #     .filter(Category.id.in_(cat_ids))
+    #     #             #     .subquery()
+    #     #             # )
+                    
+    #     #             # SAWarning: Coercing Subquery object into a select() for use in IN(); please pass a select() construct explicitly q = q.filter(Course.id.in_(cat_sq))
+                    
+    #     #             # v2
+    #     #             # Option 2: Use scalar_subquery() (cleaner, 1.4+ compatible)
+    #     #             cat_sq = (
+    #     #                 db.query(Course.id)
+    #     #                 .join(Course.categories)
+    #     #                 .filter(Category.id.in_(cat_ids))
+    #     #                 .scalar_subquery()
+    #     #             )
+    #     #             q = q.filter(Course.id.in_(cat_sq))
+
+    #     #             q = q.filter(Course.id.in_(cat_sq))
+    #     #         except ValueError:
+    #     #             cat_sq = (
+    #     #                 db.query(Course.id)
+    #     #                 .join(Course.categories)
+    #     #                 .filter(Category.id.in_(cat_ids))
+    #     #                 .scalar_subquery()
+    #     #             )
+    #     #             q = q.filter(Course.id.in_(cat_sq))
+                    
+    #     if category:
+    #         raw = [s.strip() for s in category.split(",") if s.strip()]
+
+    #         if raw:
+    #             category_ids = []
+    #             category_slugs = []
+
+    #             for value in raw:
+    #                 try:
+    #                     category_ids.append(int(value))
+    #                 except ValueError:
+    #                     category_slugs.append(value)
+
+    #             category_filter = []
+
+    #             if category_ids:
+    #                 category_filter.append(Category.id.in_(category_ids))
+
+    #             if category_slugs:
+    #                 category_filter.append(Category.slug.in_(category_slugs))
+
+    #             if category_filter:
+    #                 cat_sq = (
+    #                     db.query(Course.id)
+    #                     .join(Course.categories)
+    #                     .filter(or_(*category_filter))
+    #                     .scalar_subquery()
+    #                 )
+
+    #                 q = q.filter(Course.id.in_(cat_sq))  
+            
+    #             if level:
+    #                 raw_levels = [s.strip() for s in level.split(",") if s.strip()]
+    #                 if raw_levels:
+    #                     q = q.filter(Course.level.in_(raw_levels))
+    #             if payment_type:
+    #                 raw_types = [s.strip() for s in payment_type.split(",") if s.strip()]
+    #                 if raw_types:
+    #                     q = q.filter(Course.payment_type.in_(raw_types))
+    #             if featured is not None:
+    #                 q = q.filter(Course.featured == featured)
+    #             if creator_id:
+    #                 q = q.filter(Course.creator_id == creator_id)
+    #             return q
+
+    # v2
     def _apply_filters(q):
         if status:
             q = q.filter(Course.status == status)
+
         if search:
             q = q.filter(or_(
                 Course.title.ilike(f"%{search}%"),
                 Course.description.ilike(f"%{search}%"),
             ))
+
         if category:
             raw = [s.strip() for s in category.split(",") if s.strip()]
-            if raw:
+            ids, slugs = [], []
+            for value in raw:
                 try:
-                    cat_ids = [int(c) for c in raw]
-                    
-                    # cat_sq = (
-                    #     db.query(Course.id)
-                    #     .join(Course.categories)
-                    #     .filter(Category.id.in_(cat_ids))
-                    #     .subquery()
-                    # )
-                    
-                    # SAWarning: Coercing Subquery object into a select() for use in IN(); please pass a select() construct explicitly q = q.filter(Course.id.in_(cat_sq))
-                    
-                    # v2
-                    # Option 2: Use scalar_subquery() (cleaner, 1.4+ compatible)
-                    cat_sq = (
-                        db.query(Course.id)
-                        .join(Course.categories)
-                        .filter(Category.id.in_(cat_ids))
-                        .scalar_subquery()
-                    )
-                    q = q.filter(Course.id.in_(cat_sq))
-
-                    q = q.filter(Course.id.in_(cat_sq))
+                    ids.append(int(value))
                 except ValueError:
-                    cat_sq = (
-                        db.query(Course.id)
-                        .join(Course.categories)
-                        .filter(Category.id.in_(cat_ids))
-                        .scalar_subquery()
-                    )
-                    q = q.filter(Course.id.in_(cat_sq))
+                    slugs.append(value)
+
+            conditions = []
+            if ids:
+                conditions.append(Category.id.in_(ids))
+            if slugs:
+                conditions.append(Category.slug.in_(slugs))
+            if conditions:
+                q = q.filter(Course.categories.any(or_(*conditions)))
+
         if level:
             raw_levels = [s.strip() for s in level.split(",") if s.strip()]
             if raw_levels:
                 q = q.filter(Course.level.in_(raw_levels))
+
         if payment_type:
             raw_types = [s.strip() for s in payment_type.split(",") if s.strip()]
             if raw_types:
                 q = q.filter(Course.payment_type.in_(raw_types))
+
         if featured is not None:
             q = q.filter(Course.featured == featured)
+
         if creator_id:
             q = q.filter(Course.creator_id == creator_id)
+
         return q
 
     # ── Count ─────────────────────────────────────────────────────
@@ -799,21 +660,22 @@ async def list_courses(
         }
     
     # Pre-compute feedback stats (avg_rating, count) for all courses
-    feedback_stats = dict(
+    # v2
+    rows = (
         db.query(
             Feedback.course_id,
-            func.avg(Feedback.rating).label("avg"),
-            func.count(Feedback.id).label("cnt")
+            func.avg(Feedback.rating),
+            func.count(Feedback.id),
         )
         .filter(Feedback.course_id.in_(course_ids))
         .group_by(Feedback.course_id)
         .all()
     )
     feedback_stats = {
-        cid: (round(avg, 1) if avg else None, cnt)
-        for cid, avg, cnt in feedback_stats
+        cid: (round(float(avg), 1) if avg else None, cnt)
+        for cid, avg, cnt in rows
     }
-    
+        
     # Pre-compute topic counts for all courses
     topic_counts = dict(
         db.query(Topic.course_id, func.count(Topic.id))
@@ -1340,123 +1202,6 @@ async def upload_thumbnail(
     _invalidate_course_caches(course_id, slug=course.slug)
 
     return {"thumbnail": url, "url": url}
-
-
-# @router.post("/{course_id}/topics/{topic_id}/upload-content")
-# async def upload_topic_content(
-#     course_id: int,
-#     topic_id: int,
-#     file: UploadFile = File(...),
-#     content_type_hint: Optional[str] = Query(None),
-#     user: User = Depends(get_current_verified_user),
-#     db: Session = Depends(get_db),
-# ):
-#     topic = db.query(Topic).filter(
-#         Topic.id == topic_id, Topic.course_id == course_id,
-#     ).first()
-#     if not topic:
-#         raise HTTPException(status_code=404, detail="Topic not found")
-
-#     course = topic.course
-#     if course.creator_id != user.id and not user.is_admin():
-#         raise HTTPException(status_code=403, detail="Access denied")
-
-#     if file.content_type not in ALLOWED_MEDIA:
-#         raise HTTPException(
-#             status_code=400, detail=f"File type not allowed: {file.content_type}"
-#         )
-
-#     cfg = get_app_config()
-#     upload_dir = os.path.join(
-#         cfg.hosting_config.content_delivery.filesystem_base_path,
-#         "courses", "content",
-#     )
-#     os.makedirs(upload_dir, exist_ok=True)
-
-#     ext = file.filename.rsplit(".", 1)[-1].lower()
-#     filename = f"{uuid.uuid4().hex}.{ext}"
-#     content = await file.read()
-
-#     max_bytes = cfg.hosting_config.content_delivery.max_file_size_mb * 1024 * 1024
-#     if len(content) > max_bytes:
-#         raise HTTPException(status_code=400, detail="File too large")
-
-#     with open(os.path.join(upload_dir, filename), "wb") as fh:
-#         fh.write(content)
-
-#     mime = file.content_type
-#     from app.models.courses import ContentType as CT_model
-#     if "video" in mime:        ct = CT_model.video
-#     elif "pdf" in mime:        ct = CT_model.pdf
-#     elif "image" in mime:      ct = CT_model.image
-#     elif "powerpoint" in mime or "presentation" in mime: ct = CT_model.ppt
-#     elif "audio" in mime:      ct = CT_model.audio
-#     else:                      ct = CT_model.doc
-
-#     tc = TopicContent(
-#         title=file.filename, content_type=ct,
-#         file_path=filename, mime_type=mime,
-#         file_size_bytes=len(content),
-#         topic_id=topic_id,
-#         order_index=len(topic.contents),
-#     )
-#     db.add(tc)
-#     db.commit()
-#     db.refresh(tc)
-
-#     # New content item changes contents_count in the cached struct
-#     _invalidate_course_caches(course_id, slug=course.slug)
-
-#     return {
-#         "id": tc.id,
-#         "title": file.filename,
-#         "content_type": ct,
-#         "url": _make_content_token_url(tc, user.id),
-#         "mime_type": mime,
-#         "order_index": tc.order_index,
-#     }
-
-
-# @router.delete("/{course_id}/topics/{topic_id}/content/{content_id}")
-# async def delete_topic_content(
-#     course_id: int,
-#     topic_id: int,
-#     content_id: int,
-#     user: User = Depends(get_current_verified_user),
-#     db: Session = Depends(get_db),
-# ):
-#     """Delete a single content item from a topic."""
-#     tc = db.query(TopicContent).filter(
-#         TopicContent.id == content_id,
-#         TopicContent.topic_id == topic_id,
-#     ).first()
-#     if not tc:
-#         raise HTTPException(status_code=404, detail="Content not found")
-
-#     topic = db.query(Topic).filter(
-#         Topic.id == topic_id, Topic.course_id == course_id,
-#     ).first()
-#     if not topic:
-#         raise HTTPException(status_code=404, detail="Topic not found")
-
-#     if topic.course.creator_id != user.id and not user.is_admin():
-#         raise HTTPException(status_code=403, detail="Access denied")
-
-#     if tc.file_path:
-#         cfg = get_app_config()
-#         full_path = os.path.join(
-#             cfg.hosting_config.content_delivery.filesystem_base_path,
-#             "courses", "content", tc.file_path,
-#         )
-#         if os.path.exists(full_path):
-#             os.remove(full_path)
-
-#     db.delete(tc)
-#     db.commit()
-
-#     _invalidate_course_caches(course_id, slug=topic.course.slug)
-#     return SuccessResponse(message="Content deleted")
-
 
 # v2
 @router.post("/{course_id}/topics/{topic_id}/upload-content")
