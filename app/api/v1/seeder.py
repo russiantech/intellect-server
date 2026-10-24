@@ -1381,7 +1381,7 @@ course_data_Nodejs = {
   ]
 }
 
-course_data = {
+course_data_ExpressJS = {
 "title": "Express JS",
 "lessons": [
 {
